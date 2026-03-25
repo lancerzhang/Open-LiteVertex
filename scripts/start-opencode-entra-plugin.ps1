@@ -12,6 +12,44 @@ $demoEnvFile = Join-Path $root ".demo.env"
 $entraEnvFile = Join-Path $root ".entra.env"
 $configFile = Join-Path $root "opencode.json"
 $installScript = Join-Path $PSScriptRoot "install-opencode-entra-plugin.ps1"
+$authFile = Join-Path $HOME ".local\share\opencode\auth.json"
+$mode = "start"
+$forceLogin = $false
+$opencodeArgs = New-Object System.Collections.Generic.List[string]
+
+foreach ($arg in $Args) {
+    if ($opencodeArgs.Count -eq 0 -and $arg -eq "--login-only") {
+        $mode = "login-only"
+        continue
+    }
+    if ($opencodeArgs.Count -eq 0 -and $arg -eq "--relogin") {
+        $forceLogin = $true
+        continue
+    }
+    [void]$opencodeArgs.Add($arg)
+}
+
+function Test-LiteLLMAuth {
+    if (-not (Test-Path $authFile)) {
+        return $false
+    }
+
+    try {
+        $payload = Get-Content $authFile -Raw | ConvertFrom-Json
+    } catch {
+        return $false
+    }
+
+    return ($null -ne $payload.litellm)
+}
+
+function Invoke-LiteLLMLogin {
+    Write-Host "No saved LiteLLM provider login found. Starting Entra device-code login..." -ForegroundColor Yellow
+    & $cmd.Source "providers" "login" "--provider" "litellm"
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
 
 if (-not (Test-Path $demoEnvFile)) {
     throw "Missing .demo.env. Run scripts\deploy-demo.ps1 first."
@@ -57,7 +95,16 @@ if ($null -eq $cmd) {
 
 Push-Location $root
 try {
-    & $cmd.Source @Args
+    if ($mode -eq "login-only") {
+        Invoke-LiteLLMLogin
+        exit 0
+    }
+
+    if ($forceLogin -or -not (Test-LiteLLMAuth)) {
+        Invoke-LiteLLMLogin
+    }
+
+    & $cmd.Source @opencodeArgs
 } finally {
     Pop-Location
 }

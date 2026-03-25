@@ -210,20 +210,30 @@ Linux:
 
 - `~/.config/opencode/plugins/entra-litellm-auth.ts`
 
-### 8.2 登录并启动 Plugin 模式
+### 8.2 启动 Plugin 模式
 
 Windows:
 
 ```powershell
-.\scripts\login-opencode-entra-plugin.ps1
 .\scripts\start-opencode-entra-plugin.ps1
 ```
 
 Linux:
 
 ```bash
-./scripts/login-opencode-entra-plugin.sh
 ./scripts/start-opencode-entra-plugin.sh
+```
+
+第一次运行时，这个脚本会先自动执行 `opencode providers login --provider litellm`，完成 device code 登录，然后再进入 OpenCode。
+
+如果只想单独刷新登录态，可以用：
+
+```powershell
+.\scripts\start-opencode-entra-plugin.ps1 --login-only
+```
+
+```bash
+./scripts/start-opencode-entra-plugin.sh --login-only
 ```
 
 ### 8.3 直接 Token 模式

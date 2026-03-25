@@ -30,8 +30,6 @@ Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Aut
 - `plugins/entra-litellm-auth.ts`: canonical source for the global OpenCode Entra plugin.
 - `scripts/install-opencode-entra-plugin.ps1`: install or refresh the global OpenCode plugin on Windows.
 - `scripts/install-opencode-entra-plugin.sh`: install or refresh the global OpenCode plugin on Linux.
-- `scripts/login-opencode-entra-plugin.ps1`: connect the `litellm` provider through the global plugin auth flow.
-- `scripts/login-opencode-entra-plugin.sh`: Linux wrapper for plugin login.
 - `scripts/start-opencode-entra-plugin.ps1`: launch `OpenCode` with the global plugin auth path.
 - `scripts/start-opencode-entra-plugin.sh`: Linux wrapper for plugin mode.
 - `scripts/start-opencode-entra-direct.ps1`: launch `OpenCode` with a fresh Entra bearer token directly.
@@ -137,17 +135,7 @@ Install or refresh it once:
 
 The `start-opencode-entra-plugin` wrappers also run this install step automatically before launching `OpenCode`.
 
-Login once:
-
-```powershell
-.\scripts\login-opencode-entra-plugin.ps1
-```
-
-```bash
-./scripts/login-opencode-entra-plugin.sh
-```
-
-Then start OpenCode:
+Start OpenCode:
 
 ```powershell
 .\scripts\start-opencode-entra-plugin.ps1
@@ -163,6 +151,17 @@ In plugin mode:
 - the plugin injects `Authorization: Bearer <entra_access_token>` on outbound `litellm` requests
 - token refresh uses the same native device-code cache in `~/.config/opencode/entra-device-token.json`
 - the plugin is global, so other projects can reuse it as long as they provide `ENTRA_*` config and a `litellm` provider
+- on the first run, the start script auto-triggers `opencode providers login --provider litellm`
+
+If you only want to refresh the provider login without starting the TUI:
+
+```powershell
+.\scripts\start-opencode-entra-plugin.ps1 --login-only
+```
+
+```bash
+./scripts/start-opencode-entra-plugin.sh --login-only
+```
 
 ### Direct Mode
 

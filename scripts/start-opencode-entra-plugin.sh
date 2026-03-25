@@ -6,6 +6,17 @@ ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 DEMO_ENV_FILE="$ROOT_DIR/.demo.env"
 ENTRA_ENV_FILE="$ROOT_DIR/.entra.env"
 CONFIG_FILE="$ROOT_DIR/opencode.json"
+AUTH_FILE="$HOME/.local/share/opencode/auth.json"
+MODE="start"
+FORCE_LOGIN="0"
+
+if [[ "${1:-}" == "--login-only" ]]; then
+  MODE="login-only"
+  shift
+elif [[ "${1:-}" == "--relogin" ]]; then
+  FORCE_LOGIN="1"
+  shift
+fi
 
 load_env_file() {
   local env_file=$1
@@ -17,6 +28,47 @@ load_env_file() {
     local value=${line#*=}
     export "$key=$value"
   done < "$env_file"
+}
+
+resolve_python_bin() {
+  if [[ -n "${PYTHON_BIN:-}" ]] && command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    printf '%s\n' "$PYTHON_BIN"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "python3"
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    printf '%s\n' "python"
+    return 0
+  fi
+  return 1
+}
+
+has_litellm_auth() {
+  local python_bin
+  python_bin=$(resolve_python_bin) || return 1
+  "$python_bin" - "$AUTH_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+entry = payload.get("litellm") if isinstance(payload, dict) else None
+raise SystemExit(0 if isinstance(entry, dict) and entry else 1)
+PY
+}
+
+run_litellm_login() {
+  echo "No saved LiteLLM provider login found. Starting Entra device-code login..." >&2
+  opencode providers login --provider litellm
 }
 
 if [[ ! -f "$DEMO_ENV_FILE" ]]; then
@@ -53,4 +105,14 @@ if ! command -v opencode >/dev/null 2>&1; then
 fi
 
 cd "$ROOT_DIR"
+
+if [[ "$MODE" == "login-only" ]]; then
+  run_litellm_login
+  exit 0
+fi
+
+if [[ "$FORCE_LOGIN" == "1" ]] || ! has_litellm_auth; then
+  run_litellm_login
+fi
+
 exec opencode "$@"

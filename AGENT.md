@@ -40,7 +40,7 @@ Supporting components:
 - `scripts/setup-entra-oss.ps1`: Entra app and group bootstrap for OSS auth flow
 - `scripts/install-opencode-entra-plugin.ps1`: install the global OpenCode plugin on Windows
 - `scripts/install-opencode-entra-plugin.sh`: install the global OpenCode plugin on Linux
-- `scripts/start-opencode-entra-plugin.ps1`: start OpenCode through the global plugin auth flow
+- `scripts/start-opencode-entra-plugin.ps1`: start OpenCode through the global plugin auth flow, auto-login on first run
 - `scripts/start-opencode-entra-direct.ps1`: direct token-based OpenCode startup
 
 ## Working Rules
@@ -92,7 +92,6 @@ Get-Content .demo.env
 ### Start OpenCode with plugin auth
 
 ```powershell
-.\scripts\login-opencode-entra-plugin.ps1
 .\scripts\start-opencode-entra-plugin.ps1
 ```
 
