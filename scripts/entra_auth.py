@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -13,8 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_TOKEN_CACHE_PATH = ROOT_DIR / ".secrets" / "entra-device-token.json"
+DEFAULT_TOKEN_CACHE_PATH = Path.home() / ".config" / "opencode" / "entra-device-token.json"
 DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 LOGIN_HINT = (
     "Run scripts/get-entra-token.ps1 on Windows, scripts/get-entra-token.sh on Linux, "
@@ -56,53 +53,24 @@ class AccessTokenResult:
         return payload
 
 
-def default_login_mode() -> str:
-    return "interactive" if os.name == "nt" else "device-code"
-
-
-def resolve_auth_mode(auth_mode: str, *, public_client_id: str | None) -> str:
-    normalized = (auth_mode or "auto").strip().lower() or "auto"
-    if normalized not in {"auto", "device-code", "azure-cli"}:
-        raise EntraAuthError(f"Unsupported auth mode: {auth_mode}")
-    if normalized == "auto":
-        return "device-code" if (public_client_id or "").strip() else "azure-cli"
-    return normalized
-
-
 def acquire_access_token(
     *,
     tenant_id: str,
     client_id: str,
     scope: str,
-    auth_mode: str = "auto",
-    login_mode: str | None = None,
     public_client_id: str | None = None,
     token_cache_path: Path | None = None,
     refresh_skew_seconds: int = 0,
     allow_user_interaction: bool = True,
-    az_path: str | None = None,
 ) -> dict[str, Any]:
-    resolved_auth_mode = resolve_auth_mode(auth_mode, public_client_id=public_client_id)
-    effective_login_mode = (login_mode or default_login_mode()).strip().lower() or default_login_mode()
-
-    if resolved_auth_mode == "device-code":
-        return _acquire_access_token_device_code(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            public_client_id=(public_client_id or "").strip(),
-            scope=scope,
-            token_cache_path=token_cache_path or DEFAULT_TOKEN_CACHE_PATH,
-            refresh_skew_seconds=refresh_skew_seconds,
-            allow_user_interaction=allow_user_interaction,
-        ).to_payload()
-
-    return _acquire_access_token_azure_cli(
+    return _acquire_access_token_device_code(
         tenant_id=tenant_id,
         client_id=client_id,
+        public_client_id=(public_client_id or "").strip(),
         scope=scope,
-        login_mode=effective_login_mode,
+        token_cache_path=token_cache_path or DEFAULT_TOKEN_CACHE_PATH,
+        refresh_skew_seconds=refresh_skew_seconds,
         allow_user_interaction=allow_user_interaction,
-        az_path=az_path,
     ).to_payload()
 
 
@@ -172,7 +140,7 @@ def _acquire_access_token_device_code(
 
     if not allow_user_interaction:
         raise EntraAuthError(
-            "No reusable Entra device-code token is available for the local broker. "
+            "No reusable Entra device-code token is available. "
             f"{LOGIN_HINT}"
         )
 
@@ -199,44 +167,6 @@ def _acquire_access_token_device_code(
     )
     _write_device_token_cache(token_cache_path, updated_cache)
     return result
-
-
-def _acquire_access_token_azure_cli(
-    *,
-    tenant_id: str,
-    client_id: str,
-    scope: str,
-    login_mode: str,
-    allow_user_interaction: bool,
-    az_path: str | None,
-) -> AccessTokenResult:
-    az_cmd = _require_command("az", explicit_path=az_path, install_hint="Install Azure CLI first, then rerun this command.")
-    get_token_command = [
-        az_cmd,
-        "account",
-        "get-access-token",
-        "--tenant",
-        tenant_id,
-        "--scope",
-        scope,
-        "-o",
-        "json",
-    ]
-
-    payload, stderr = _run_json_command(get_token_command)
-    if payload is None:
-        if not allow_user_interaction:
-            raise EntraAuthError(
-                "Unable to refresh Entra access token via Azure CLI. "
-                f"{LOGIN_HINT} Azure CLI said: {stderr}".strip()
-            )
-
-        _login_with_azure_cli(az_cmd, tenant_id=tenant_id, scope=scope, login_mode=login_mode)
-        payload, stderr = _run_json_command(get_token_command)
-        if payload is None:
-            raise EntraAuthError(f"Azure CLI could not fetch an access token. {stderr}".strip())
-
-    return _normalize_azure_cli_payload(payload, tenant_id=tenant_id, client_id=client_id, scope=scope)
 
 
 def _normalize_device_code_scope(scope: str) -> str:
@@ -524,66 +454,3 @@ def _coerce_int(value: Any) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return None
-
-
-def _require_command(name: str, *, explicit_path: str | None = None, install_hint: str | None = None) -> str:
-    if explicit_path:
-        explicit = explicit_path.strip()
-        if explicit and shutil.which(explicit):
-            return explicit
-
-    path = shutil.which(name)
-    if path:
-        return path
-
-    message = f"{name} is not installed or not on PATH."
-    if install_hint:
-        message = f"{message} {install_hint}"
-    raise EntraAuthError(message)
-
-
-def _run_json_command(command: list[str]) -> tuple[dict[str, Any] | None, str]:
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    stderr = (result.stderr or "").strip()
-    if result.returncode != 0:
-        return None, stderr or "command failed"
-
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise EntraAuthError(f"Command returned invalid JSON: {' '.join(command)}") from exc
-    if not isinstance(payload, dict):
-        raise EntraAuthError(f"Command returned unexpected JSON payload: {' '.join(command)}")
-    return payload, stderr
-
-
-def _login_with_azure_cli(az_path: str, *, tenant_id: str, scope: str, login_mode: str) -> None:
-    command = [az_path, "login", "--tenant", tenant_id, "--scope", scope]
-    if login_mode == "device-code":
-        command.append("--use-device-code")
-
-    completed = subprocess.run(command, check=False)
-    if completed.returncode != 0:
-        raise EntraAuthError("Azure CLI login failed.")
-
-
-def _normalize_azure_cli_payload(payload: dict[str, Any], *, tenant_id: str, client_id: str, scope: str) -> AccessTokenResult:
-    access_token = str(payload.get("accessToken", "")).strip()
-    if not access_token:
-        raise EntraAuthError("Azure CLI did not return an access token.")
-
-    expires_on_epoch = _coerce_int(payload.get("expires_on"))
-    expires_on = str(payload.get("expiresOn", "")).strip()
-    if not expires_on and expires_on_epoch is not None:
-        expires_on = _format_epoch(expires_on_epoch)
-
-    tenant = str(payload.get("tenant", "")).strip() or tenant_id
-    return AccessTokenResult(
-        access_token=access_token,
-        expires_on=expires_on,
-        expires_on_epoch=expires_on_epoch,
-        tenant=tenant,
-        client_id=client_id,
-        scope=scope,
-        auth_mode="azure-cli",
-    )

@@ -1,8 +1,15 @@
 # Open LiteVertex
 
-Open LiteVertex deploys a minimal `LiteLLM -> Vertex AI` gateway on `GKE Autopilot` and creates a weekly-budgeted API key suitable for `OpenCode`.
+Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Autopilot` and can gate access with `Microsoft Entra ID` through LiteLLM `custom_auth`.
 
-What Open LiteVertex does now:
+当前仓库的客户端路径已经收敛为两种：
+
+- `OpenCode(global plugin auth) -> LiteLLM OSS(custom_auth) -> Vertex AI`
+- `OpenCode(direct bearer token) -> LiteLLM OSS(custom_auth) -> Vertex AI`
+
+本仓库不再保留本地 broker，也不再保留 Azure CLI 的客户端登录分支。
+
+## What It Does
 
 - Creates or reuses a `GKE Autopilot` cluster.
 - Deploys `Postgres` inside the cluster for LiteLLM state.
@@ -13,35 +20,27 @@ What Open LiteVertex does now:
 - Creates a demo key with a `$50 / 7d` budget.
 - Writes the endpoint and key to `.demo.env`.
 
-What still needs your input:
-
-- `Microsoft Entra ID` tenant / app values if you want to turn on Entra JWT auth.
-
 ## Files
 
-- `config/litellm-config.yaml`: base LiteLLM config for Vertex AI.
-- `config/litellm-config.entra-example.yaml`: older Enterprise-only reference snippet.
-- `config/auth_handler.py`: OSS `custom_auth` handler for Entra groups plus LiteLLM keys.
+- `config/auth_handler.py`: OSS `custom_auth` handler for Entra groups, user upsert, and shared-team assignment.
+- `config/litellm-config.yaml`: base LiteLLM routing and model config.
 - `config/opencode.example.json`: example `OpenCode` provider config.
+- `docs/opencode-litellm-entra-vertex-flow.md`: architecture and end-to-end flow.
 - `k8s/`: Kubernetes manifests.
-- `scripts/deploy-demo.ps1`: cluster bootstrap + deployment.
-- `scripts/bootstrap-user-key.ps1`: create a weekly-budgeted LiteLLM key.
-- `scripts/create-entra-team.ps1`: create a LiteLLM team whose `team_id` matches an Entra group ID.
-- `scripts/setup-entra-oss.ps1`: create a dedicated Entra API app, a separate public client app for device code login, and the allowed security group.
-- `scripts/get-entra-token.ps1`: fetch a delegated access token for the API app via native device code or Azure CLI fallback.
-- `scripts/get-entra-token.sh`: Linux wrapper for delegated Entra token acquisition, preferring native device code.
-- `scripts/decode-jwt.ps1`: inspect a JWT locally and confirm `aud`, `iss`, and `groups`.
-- `scripts/start-opencode-entra-direct.ps1`: launch `OpenCode` using a fresh Entra access token directly against LiteLLM.
-- `scripts/start-opencode-entra-direct.sh`: Linux wrapper for direct Entra token mode.
-- `scripts/start-entra-broker.ps1`: start a local auto-refresh broker on `127.0.0.1`.
-- `scripts/start-entra-broker.sh`: Linux wrapper for the local auto-refresh broker.
-- `scripts/start-opencode-entra-broker.ps1`: launch `OpenCode` against the local broker.
-- `scripts/start-opencode-entra-broker.sh`: Linux wrapper for broker mode.
-- `scripts/stop-entra-broker.ps1`: stop the local broker.
-- `scripts/stop-entra-broker.sh`: Linux wrapper to stop the local broker.
-- `scripts/entra_client.py`: shared cross-platform client entrypoint used by the Windows and Linux wrappers.
-- `scripts/entra_auth.py`: shared Entra auth helper for native device code, refresh-token cache, and Azure CLI fallback.
-- `scripts/entra_litellm_broker.py`: local FastAPI broker that refreshes Entra tokens and forwards to LiteLLM.
+- `plugins/entra-litellm-auth.ts`: canonical source for the global OpenCode Entra plugin.
+- `scripts/install-opencode-entra-plugin.ps1`: install or refresh the global OpenCode plugin on Windows.
+- `scripts/install-opencode-entra-plugin.sh`: install or refresh the global OpenCode plugin on Linux.
+- `scripts/login-opencode-entra-plugin.ps1`: connect the `litellm` provider through the global plugin auth flow.
+- `scripts/login-opencode-entra-plugin.sh`: Linux wrapper for plugin login.
+- `scripts/start-opencode-entra-plugin.ps1`: launch `OpenCode` with the global plugin auth path.
+- `scripts/start-opencode-entra-plugin.sh`: Linux wrapper for plugin mode.
+- `scripts/start-opencode-entra-direct.ps1`: launch `OpenCode` with a fresh Entra bearer token directly.
+- `scripts/start-opencode-entra-direct.sh`: Linux wrapper for direct-token mode.
+- `scripts/get-entra-token.ps1`: fetch a delegated access token for the API app through native device code.
+- `scripts/get-entra-token.sh`: Linux wrapper for delegated Entra token acquisition.
+- `scripts/entra_auth.py`: shared native device-code helper with refresh-token cache support.
+- `scripts/entra_client.py`: shared cross-platform client entrypoint used by direct-mode and token wrappers.
+- `scripts/setup-entra-oss.ps1`: create the Entra API app, the public client app for device code login, and the allowed security group.
 
 ## Quick Start
 
@@ -52,7 +51,7 @@ From the repo root:
 Get-Content .demo.env
 ```
 
-Then point `OpenCode` at the generated endpoint/key using `config/opencode.example.json`.
+Then point `OpenCode` at the generated endpoint/key using `opencode.json` or `config/opencode.example.json`.
 
 For the full OSS architecture and user flow, see:
 
@@ -82,25 +81,9 @@ With the default OSS `custom_auth` path:
 - the same user is also added to one shared LiteLLM team
 - requests are tagged with that `team_id`, so team spend and team budget work in the LiteLLM UI
 
-## Local Broker
-
-The local broker is a client-side helper for headless or long-running Linux sessions. It sits between `OpenCode` and LiteLLM and does two things:
-
-- Prefers native Microsoft Entra device code login with a separate public client app, then refreshes with the cached refresh token.
-- Falls back to Azure CLI when `ENTRA_PUBLIC_CLIENT_ID` is not available or when you explicitly force `--auth-mode azure-cli`.
-- Forwards OpenAI-compatible requests to the real LiteLLM endpoint, adding `Authorization: Bearer <entra_access_token>` on the way out.
-
-Use it when you want a stable local endpoint for `OpenCode` instead of minting a new token for every run. It does not change the server-side auth model and does not replace LiteLLM `custom_auth`.
-
-Request flow:
-
-`OpenCode -> local broker -> LiteLLM OSS(custom_auth) -> Vertex AI`
-
-The broker is started by `scripts/start-entra-broker.ps1` or `scripts/start-entra-broker.sh`. The combined launcher `scripts/start-opencode-entra-broker.ps1` or `scripts/start-opencode-entra-broker.sh` starts the broker and then launches `OpenCode` against it.
-
 ## Entra OSS Setup
 
-The open-source path uses LiteLLM `custom_auth` inside the LiteLLM pod. To create the Entra values it needs:
+To create the Entra values required by the OSS `custom_auth` path:
 
 ```powershell
 .\scripts\setup-entra-oss.ps1 `
@@ -119,22 +102,71 @@ This script writes `.entra.env` with:
 - `ENTRA_ISSUER`
 - `ENTRA_JWKS_URI`
 
-To get a token for testing:
+To fetch a bearer token for testing:
 
 ```powershell
 $resp = .\scripts\get-entra-token.ps1 | ConvertFrom-Json
 .\scripts\decode-jwt.ps1 -Token $resp.accessToken
 ```
 
-On Linux or a headless server, the wrapper prefers native device code login. It prints a verification URL and user code returned by Microsoft Entra, and stores the refresh token in `.secrets/entra-device-token.json` for later reuse:
-
 ```bash
 ./scripts/get-entra-token.sh
 ```
 
-## OpenCode with Entra
+The native device-code flow prints Microsoft Entra's verification URL and user code in the terminal, then stores the refresh token in the global cache file:
 
-For a quick direct test, launch `OpenCode` with a fresh Entra access token:
+- `~/.config/opencode/entra-device-token.json`
+
+## OpenCode With Entra
+
+### Plugin Mode
+
+The preferred path is the global OpenCode plugin. The canonical plugin source lives in this repo, but the runtime copy is installed into:
+
+- `~/.config/opencode/plugins/entra-litellm-auth.ts`
+
+Install or refresh it once:
+
+```powershell
+.\scripts\install-opencode-entra-plugin.ps1
+```
+
+```bash
+./scripts/install-opencode-entra-plugin.sh
+```
+
+The `start-opencode-entra-plugin` wrappers also run this install step automatically before launching `OpenCode`.
+
+Login once:
+
+```powershell
+.\scripts\login-opencode-entra-plugin.ps1
+```
+
+```bash
+./scripts/login-opencode-entra-plugin.sh
+```
+
+Then start OpenCode:
+
+```powershell
+.\scripts\start-opencode-entra-plugin.ps1
+```
+
+```bash
+./scripts/start-opencode-entra-plugin.sh
+```
+
+In plugin mode:
+
+- `OpenCode` keeps talking directly to LiteLLM
+- the plugin injects `Authorization: Bearer <entra_access_token>` on outbound `litellm` requests
+- token refresh uses the same native device-code cache in `~/.config/opencode/entra-device-token.json`
+- the plugin is global, so other projects can reuse it as long as they provide `ENTRA_*` config and a `litellm` provider
+
+### Direct Mode
+
+For quick debugging, you can still launch `OpenCode` with a freshly minted bearer token:
 
 ```powershell
 .\scripts\start-opencode-entra-direct.ps1
@@ -144,33 +176,18 @@ For a quick direct test, launch `OpenCode` with a fresh Entra access token:
 ./scripts/start-opencode-entra-direct.sh
 ```
 
-This reuses the project `opencode.json` and injects:
+This mode:
 
-- `LITELLM_OPENAI_BASE_URL=<litellm>/v1`
-- `LITELLM_API_KEY=<entra_access_token>`
+- fetches a fresh token through native device code
+- injects it into `LITELLM_API_KEY`
+- disables the global plugin for that one process so the request path stays fully direct
 
-For a smoother local dev loop, start the local broker once and point `OpenCode` at `localhost`:
+## Model Config
 
-```powershell
-.\scripts\start-entra-broker.ps1
-.\scripts\start-opencode-entra-broker.ps1
-```
+The repo ships these model aliases in `opencode.json` and `config/opencode.example.json`:
 
-```bash
-./scripts/start-entra-broker.sh
-./scripts/start-opencode-entra-broker.sh
-```
-
-With the new `.entra.env`, both Windows and Linux wrappers prefer native device code first. If you need the old path, pass `--auth-mode azure-cli` to the bash wrappers or `-AuthMode azure-cli` to the PowerShell wrappers.
-
-The broker refreshes the Entra token before expiry and forwards requests to LiteLLM. To stop it:
-
-```powershell
-.\scripts\stop-entra-broker.ps1
-```
-
-```bash
-./scripts/stop-entra-broker.sh
-```
-
-If you need the broker to bind beyond localhost on Linux, pass `--host 0.0.0.0` to `scripts/start-entra-broker.sh` or `-Host 0.0.0.0` to `scripts/start-entra-broker.ps1`.
+- `vertex-gemini-2.5-flash`
+- `vertex-gemini-2.5-flash-lite`
+- `vertex-gemini-2.5-pro`
+- `vertex-gemini-3-pro-preview`
+- `vertex-claude-sonnet-4-6`

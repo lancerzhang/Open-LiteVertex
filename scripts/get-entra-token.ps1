@@ -5,11 +5,6 @@ param(
 
     [string]$PublicClientId,
 
-    [ValidateSet("auto", "device-code", "azure-cli")]
-    [string]$AuthMode = "auto",
-
-    [switch]$UseDeviceCode,
-
     [string]$Scope
 )
 
@@ -26,12 +21,9 @@ function Get-PythonCommand {
 
 $python = Get-PythonCommand
 $clientScript = Join-Path $PSScriptRoot "entra_client.py"
-$loginMode = if ($UseDeviceCode) { "device-code" } else { "interactive" }
 $commandArgs = @(
     $clientScript,
-    "get-token",
-    "--auth-mode", $AuthMode,
-    "--login-mode", $loginMode
+    "get-token"
 )
 
 if ($TenantId) {

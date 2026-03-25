@@ -23,4 +23,4 @@ elif ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-exec "$PYTHON_BIN" "$SCRIPT_DIR/entra_client.py" run-opencode-direct --login-mode device-code -- "$@"
+exec "$PYTHON_BIN" "$SCRIPT_DIR/entra_client.py" run-opencode-direct -- "$@"
