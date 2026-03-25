@@ -9,6 +9,7 @@ What Open LiteVertex does now:
 - Builds a thin custom LiteLLM image on top of the official stable image.
 - Uses `Workload Identity` so LiteLLM can call `Vertex AI` without a JSON key.
 - Loads `custom_auth` inside the LiteLLM pod for `Entra JWT groups` validation.
+- Auto-creates a LiteLLM internal user per Entra `oid` and places Entra users into a shared LiteLLM team.
 - Creates a demo key with a `$50 / 7d` budget.
 - Writes the endpoint and key to `.demo.env`.
 
@@ -68,6 +69,18 @@ If `.entra.env` exists when you run `.\scripts\deploy-demo.ps1`, the script inje
 - `ENTRA_ALLOWED_GROUP_ID` or `ENTRA_ALLOWED_GROUP_IDS`
 - optional `ENTRA_ISSUER`
 - optional `ENTRA_JWKS_URI`
+- optional `ENTRA_SHARED_TEAM_ID`
+- optional `ENTRA_SHARED_TEAM_ALIAS`
+- optional `ENTRA_SHARED_TEAM_MAX_BUDGET`
+- optional `ENTRA_SHARED_TEAM_BUDGET_DURATION`
+- optional `ENTRA_SHARED_TEAM_MEMBER_MAX_BUDGET`
+
+With the default OSS `custom_auth` path:
+
+- LiteLLM upserts one internal user per Entra `oid`
+- the user keeps personal spend tracking and a personal budget
+- the same user is also added to one shared LiteLLM team
+- requests are tagged with that `team_id`, so team spend and team budget work in the LiteLLM UI
 
 ## Local Broker
 

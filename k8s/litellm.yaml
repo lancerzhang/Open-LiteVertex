@@ -97,6 +97,33 @@ spec:
                 secretKeyRef:
                   name: litellm-secrets
                   key: entra-user-budget-duration
+            - name: ENTRA_SHARED_TEAM_ID
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-shared-team-id
+            - name: ENTRA_SHARED_TEAM_ALIAS
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-shared-team-alias
+            - name: ENTRA_SHARED_TEAM_MAX_BUDGET
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-shared-team-max-budget
+            - name: ENTRA_SHARED_TEAM_BUDGET_DURATION
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-shared-team-budget-duration
+            - name: ENTRA_SHARED_TEAM_MEMBER_MAX_BUDGET
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-shared-team-member-max-budget
+            - name: LITELLM_INTERNAL_BASE_URL
+              value: "http://127.0.0.1:4000"
             - name: VERTEX_TRACE_REQUESTS
               value: "true"
             - name: VERTEX_TRACE_INCLUDE_SECRETS

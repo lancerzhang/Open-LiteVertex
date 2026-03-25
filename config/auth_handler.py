@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -7,6 +8,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlsplit
 
+import httpx
 import jwt
 from fastapi import HTTPException, Request, status
 from jwt import InvalidTokenError, PyJWKClient
@@ -24,6 +26,8 @@ DEFAULT_ALLOWED_MODELS = [
     "vertex-claude-sonnet-4-6",
 ]
 DEFAULT_PROXY_ADMIN_USER_ID = "litellm-proxy-admin"
+DEFAULT_ENTRA_SHARED_TEAM_ALIAS = "entra-allowed-users"
+DEFAULT_INTERNAL_MANAGEMENT_BASE_URL = "http://127.0.0.1:4000"
 TRACE_LOG_PREFIX = "vertex-trace"
 SENSITIVE_HEADER_NAMES = {
     "authorization",
@@ -33,6 +37,9 @@ SENSITIVE_HEADER_NAMES = {
     "x-goog-api-key",
     "api-key",
 }
+_TEAM_SYNC_LOCK = asyncio.Lock()
+_ENSURED_TEAM_IDS: set[str] = set()
+_ENSURED_TEAM_MEMBERS: set[tuple[str, str]] = set()
 
 
 def _is_truthy(value: Optional[str]) -> bool:
@@ -134,6 +141,51 @@ def _install_vertex_request_trace_patch() -> None:
 _install_vertex_request_trace_patch()
 
 
+def _install_admin_ui_session_key_patch() -> None:
+    try:
+        from litellm.constants import LITELLM_PROXY_ADMIN_NAME
+        from litellm.proxy.auth import login_utils
+    except Exception as exc:
+        logging.exception("Unable to install admin UI session key patch: %s", exc)
+        return
+
+    if getattr(login_utils.generate_key_helper_fn, "_open_litevertex_ui_admin_patch", False):
+        return
+
+    original_generate_key_helper_fn = login_utils.generate_key_helper_fn
+
+    async def patched_generate_key_helper_fn(*args: Any, **kwargs: Any):
+        user_role = kwargs.get("user_role")
+        user_id = kwargs.get("user_id")
+        team_id = kwargs.get("team_id")
+
+        is_proxy_admin_role = False
+        if isinstance(user_role, LitellmUserRoles):
+            is_proxy_admin_role = user_role == LitellmUserRoles.PROXY_ADMIN
+        elif isinstance(user_role, str):
+            is_proxy_admin_role = user_role.strip() == LitellmUserRoles.PROXY_ADMIN.value
+
+        # LiteLLM's default UI login creates a short-lived admin key on the
+        # special litellm-dashboard team. That key cannot access /user/list and
+        # related admin APIs. For proxy-admin UI logins, generate a regular
+        # short-lived admin key instead.
+        if (
+            team_id == "litellm-dashboard"
+            and is_proxy_admin_role
+            and user_id == LITELLM_PROXY_ADMIN_NAME
+        ):
+            kwargs = dict(kwargs)
+            kwargs.pop("team_id", None)
+
+        return await original_generate_key_helper_fn(*args, **kwargs)
+
+    setattr(patched_generate_key_helper_fn, "_open_litevertex_ui_admin_patch", True)
+    login_utils.generate_key_helper_fn = patched_generate_key_helper_fn
+
+
+_install_admin_ui_session_key_patch()
+
+
 def _normalize_token(api_key: str) -> str:
     token = (api_key or "").strip()
     for prefix in ("Bearer ", "bearer ", "Basic ", "basic "):
@@ -171,6 +223,47 @@ def _get_user_budget() -> float:
 
 def _get_user_budget_duration() -> str:
     return os.getenv("ENTRA_USER_BUDGET_DURATION", "7d").strip() or "7d"
+
+
+def _get_shared_team_id(matched_group_ids: List[str]) -> Optional[str]:
+    configured = _first_env("ENTRA_SHARED_TEAM_ID")
+    if configured:
+        return configured
+    if len(matched_group_ids) == 1:
+        return matched_group_ids[0]
+    allowed_group_ids = _require_entra_settings()["allowed_group_ids"]
+    if len(allowed_group_ids) == 1:
+        return allowed_group_ids[0]
+    return None
+
+
+def _get_shared_team_alias(team_id: str) -> str:
+    configured = os.getenv("ENTRA_SHARED_TEAM_ALIAS", "").strip()
+    if configured:
+        return configured
+    return DEFAULT_ENTRA_SHARED_TEAM_ALIAS if team_id else DEFAULT_ENTRA_SHARED_TEAM_ALIAS
+
+
+def _get_shared_team_budget() -> float:
+    raw_value = os.getenv("ENTRA_SHARED_TEAM_MAX_BUDGET", "").strip()
+    if raw_value:
+        return float(raw_value)
+    return _get_user_budget()
+
+
+def _get_shared_team_budget_duration() -> str:
+    return os.getenv("ENTRA_SHARED_TEAM_BUDGET_DURATION", "").strip() or _get_user_budget_duration()
+
+
+def _get_shared_team_member_budget() -> float:
+    raw_value = os.getenv("ENTRA_SHARED_TEAM_MEMBER_MAX_BUDGET", "").strip()
+    if raw_value:
+        return float(raw_value)
+    return _get_user_budget()
+
+
+def _get_internal_management_base_url() -> str:
+    return os.getenv("LITELLM_INTERNAL_BASE_URL", "").strip().rstrip("/") or DEFAULT_INTERNAL_MANAGEMENT_BASE_URL
 
 
 def _is_jwt(token: str) -> bool:
@@ -311,6 +404,173 @@ def _build_jwt_claims_metadata(claims: Dict[str, Any], matched_group_ids: List[s
     }
 
 
+async def _call_management_api(
+    method: str,
+    path: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    json_payload: Optional[Dict[str, Any]] = None,
+    expected_statuses: Optional[set[int]] = None,
+) -> Optional[Any]:
+    master_key = os.getenv("LITELLM_MASTER_KEY", "").strip()
+    if not master_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="LiteLLM team sync requires LITELLM_MASTER_KEY to be configured.",
+        )
+
+    base_url = _get_internal_management_base_url()
+    url = f"{base_url}{path}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.request(
+            method,
+            url,
+            headers={"Authorization": f"Bearer {master_key}"},
+            params=params,
+            json=json_payload,
+        )
+
+    allowed_statuses = expected_statuses or {200}
+    if response.status_code in allowed_statuses:
+        if response.status_code == 404:
+            return None
+        if response.content:
+            return response.json()
+        return None
+
+    detail = response.text
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or payload.get("error", {}).get("message") or response.text
+    except Exception:
+        pass
+
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=f"LiteLLM management API call failed for {path}: {detail}",
+    )
+
+
+def _build_shared_team_metadata(shared_team_id: str, matched_group_ids: List[str]) -> Dict[str, Any]:
+    return {
+        "auth_provider": "entra",
+        "team_mode": "shared",
+        "shared_team_id": shared_team_id,
+        "allowed_group_ids": _require_entra_settings()["allowed_group_ids"],
+        "matched_group_ids": matched_group_ids,
+    }
+
+
+async def _ensure_shared_team_membership(
+    *,
+    user_id: str,
+    user_email: Optional[str],
+    matched_group_ids: List[str],
+) -> Optional[Dict[str, Any]]:
+    shared_team_id = _get_shared_team_id(matched_group_ids)
+    if not shared_team_id:
+        return None
+
+    shared_team_alias = _get_shared_team_alias(shared_team_id)
+    models = _get_allowed_models()
+    team_budget = _get_shared_team_budget()
+    team_budget_duration = _get_shared_team_budget_duration()
+    team_member_budget = _get_shared_team_member_budget()
+
+    async with _TEAM_SYNC_LOCK:
+        if shared_team_id not in _ENSURED_TEAM_IDS:
+            team_info_response = await _call_management_api(
+                "GET",
+                "/team/info",
+                params={"team_id": shared_team_id},
+                expected_statuses={200, 404},
+            )
+            team_info = None
+            if isinstance(team_info_response, dict):
+                nested_team_info = team_info_response.get("team_info")
+                if isinstance(nested_team_info, dict):
+                    team_info = nested_team_info
+            team_payload = {
+                "team_id": shared_team_id,
+                "team_alias": shared_team_alias,
+                "models": models,
+                "max_budget": team_budget,
+                "budget_duration": team_budget_duration,
+                "metadata": _build_shared_team_metadata(
+                    shared_team_id=shared_team_id,
+                    matched_group_ids=matched_group_ids,
+                ),
+            }
+            if team_info is None:
+                await _call_management_api(
+                    "POST",
+                    "/team/new",
+                    json_payload=team_payload,
+                    expected_statuses={200},
+                )
+            else:
+                needs_update = (
+                    team_info.get("team_alias") != shared_team_alias
+                    or sorted(team_info.get("models") or []) != sorted(models)
+                    or team_info.get("max_budget") != team_budget
+                    or team_info.get("budget_duration") != team_budget_duration
+                )
+                if needs_update:
+                    await _call_management_api(
+                        "POST",
+                        "/team/update",
+                        json_payload=team_payload,
+                        expected_statuses={200},
+                    )
+            _ENSURED_TEAM_IDS.add(shared_team_id)
+
+        membership_key = (shared_team_id, user_id)
+        if membership_key not in _ENSURED_TEAM_MEMBERS:
+            team_info_response = await _call_management_api(
+                "GET",
+                "/team/info",
+                params={"team_id": shared_team_id},
+                expected_statuses={200},
+            )
+            team_info = {}
+            if isinstance(team_info_response, dict):
+                nested_team_info = team_info_response.get("team_info")
+                if isinstance(nested_team_info, dict):
+                    team_info = nested_team_info
+            members_with_roles = team_info.get("members_with_roles") or []
+            existing_member_ids = {
+                member.get("user_id")
+                for member in members_with_roles
+                if isinstance(member, dict) and member.get("user_id")
+            }
+            if user_id not in existing_member_ids:
+                await _call_management_api(
+                    "POST",
+                    "/team/member_add",
+                    json_payload={
+                        "team_id": shared_team_id,
+                        "max_budget_in_team": team_member_budget,
+                        "member": {
+                            "role": "user",
+                            "user_id": user_id,
+                        },
+                    },
+                    expected_statuses={200},
+                )
+            _ENSURED_TEAM_MEMBERS.add(membership_key)
+
+    return {
+        "team_id": shared_team_id,
+        "team_alias": shared_team_alias,
+        "team_max_budget": team_budget,
+        "team_models": models,
+        "team_member_budget": team_member_budget,
+        "team_budget_duration": team_budget_duration,
+        "user_email": user_email,
+    }
+
+
 async def _load_existing_key(api_key: str) -> UserAPIKeyAuth:
     from litellm.proxy.proxy_server import prisma_client, proxy_logging_obj, user_api_key_cache
 
@@ -326,6 +586,24 @@ async def _load_existing_key(api_key: str) -> UserAPIKeyAuth:
         user_api_key_cache=user_api_key_cache,
         proxy_logging_obj=proxy_logging_obj,
     )
+
+    owner_user_id = getattr(key_object, "user_id", None)
+    if isinstance(owner_user_id, str) and owner_user_id.strip():
+        owner_user = await prisma_client.db.litellm_usertable.find_unique(
+            where={"user_id": owner_user_id.strip()}
+        )
+        if owner_user is not None:
+            owner_role = getattr(owner_user, "user_role", None)
+            if isinstance(owner_role, str) and owner_role.strip():
+                try:
+                    key_object.user_role = LitellmUserRoles(owner_role.strip())
+                except ValueError:
+                    pass
+
+            owner_email = getattr(owner_user, "user_email", None)
+            if isinstance(owner_email, str) and owner_email.strip():
+                key_object.user_email = owner_email.strip()
+
     key_object.api_key = api_key
     return key_object
 
@@ -441,8 +719,19 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
         user_email=user_email,
         matched_group_ids=matched_group_ids,
     )
+    team_context = await _ensure_shared_team_membership(
+        user_id=user_id,
+        user_email=user_email,
+        matched_group_ids=matched_group_ids,
+    )
 
     synthetic_token = f"entra::{user_id}"
+    metadata = {
+        "auth_provider": "entra",
+        "matched_group_ids": matched_group_ids,
+    }
+    if team_context is not None:
+        metadata["shared_team_id"] = team_context["team_id"]
     return UserAPIKeyAuth(
         api_key=synthetic_token,
         token=synthetic_token,
@@ -450,10 +739,11 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
         user_role=LitellmUserRoles.INTERNAL_USER,
         user_email=user_email,
         models=_get_allowed_models(),
-        metadata={
-            "auth_provider": "entra",
-            "matched_group_ids": matched_group_ids,
-        },
+        metadata=metadata,
+        team_id=team_context["team_id"] if team_context is not None else None,
+        team_alias=team_context["team_alias"] if team_context is not None else None,
+        team_max_budget=team_context["team_max_budget"] if team_context is not None else None,
+        team_models=team_context["team_models"] if team_context is not None else None,
         jwt_claims=_build_jwt_claims_metadata(
             claims=claims,
             matched_group_ids=matched_group_ids,

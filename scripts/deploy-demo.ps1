@@ -311,6 +311,42 @@ $entraAllowedGroupIds = $entraEnv["ENTRA_ALLOWED_GROUP_IDS"]
 if (-not $entraAllowedGroupIds) {
     $entraAllowedGroupIds = $entraEnv["ENTRA_ALLOWED_GROUP_ID"]
 }
+$entraSharedTeamId = $entraEnv["ENTRA_SHARED_TEAM_ID"]
+if (-not $entraSharedTeamId -and $entraAllowedGroupIds) {
+    $entraSharedTeamId = (
+        ($entraAllowedGroupIds -split "[,;]")
+        | ForEach-Object { $_.Trim() }
+        | Where-Object { $_ }
+        | Select-Object -First 1
+    )
+}
+if (-not $entraSharedTeamId) {
+    $entraSharedTeamId = "entra-shared-team"
+}
+$entraSharedTeamAlias = $entraEnv["ENTRA_SHARED_TEAM_ALIAS"]
+if (-not $entraSharedTeamAlias) {
+    $entraSharedTeamAlias = "entra-allowed-users"
+}
+$entraUserMaxBudget = $entraEnv["ENTRA_USER_MAX_BUDGET"]
+if (-not $entraUserMaxBudget) {
+    $entraUserMaxBudget = "50"
+}
+$entraUserBudgetDuration = $entraEnv["ENTRA_USER_BUDGET_DURATION"]
+if (-not $entraUserBudgetDuration) {
+    $entraUserBudgetDuration = "7d"
+}
+$entraSharedTeamMaxBudget = $entraEnv["ENTRA_SHARED_TEAM_MAX_BUDGET"]
+if (-not $entraSharedTeamMaxBudget) {
+    $entraSharedTeamMaxBudget = $entraUserMaxBudget
+}
+$entraSharedTeamBudgetDuration = $entraEnv["ENTRA_SHARED_TEAM_BUDGET_DURATION"]
+if (-not $entraSharedTeamBudgetDuration) {
+    $entraSharedTeamBudgetDuration = $entraUserBudgetDuration
+}
+$entraSharedTeamMemberMaxBudget = $entraEnv["ENTRA_SHARED_TEAM_MEMBER_MAX_BUDGET"]
+if (-not $entraSharedTeamMemberMaxBudget) {
+    $entraSharedTeamMemberMaxBudget = $entraUserMaxBudget
+}
 $entraAllowedAudiences = $entraEnv["ENTRA_ALLOWED_AUDIENCES"]
 $entraIssuer = $entraEnv["ENTRA_ISSUER"]
 if (-not $entraIssuer -and $entraTenantId) {
@@ -342,8 +378,13 @@ stringData:
   entra-issuer: "$entraIssuer"
   entra-jwks-uri: "$entraJwksUri"
   entra-allowed-models: "$allowedModels"
-  entra-user-max-budget: "50"
-  entra-user-budget-duration: "7d"
+  entra-user-max-budget: "$entraUserMaxBudget"
+  entra-user-budget-duration: "$entraUserBudgetDuration"
+  entra-shared-team-id: "$entraSharedTeamId"
+  entra-shared-team-alias: "$entraSharedTeamAlias"
+  entra-shared-team-max-budget: "$entraSharedTeamMaxBudget"
+  entra-shared-team-budget-duration: "$entraSharedTeamBudgetDuration"
+  entra-shared-team-member-max-budget: "$entraSharedTeamMemberMaxBudget"
 "@
 
 $secretYaml | kubectl apply -f - | Out-Null

@@ -170,6 +170,11 @@
 - `ENTRA_ALLOWED_MODELS`
 - `ENTRA_USER_MAX_BUDGET`
 - `ENTRA_USER_BUDGET_DURATION`
+- optional `ENTRA_SHARED_TEAM_ID`
+- optional `ENTRA_SHARED_TEAM_ALIAS`
+- optional `ENTRA_SHARED_TEAM_MAX_BUDGET`
+- optional `ENTRA_SHARED_TEAM_BUDGET_DURATION`
+- optional `ENTRA_SHARED_TEAM_MEMBER_MAX_BUDGET`
 
 ## 7. 用户完整使用流程
 
@@ -201,19 +206,21 @@ Authorization: Bearer <entra_access_token>
 7. 如果在允许的 Group 中，`custom_auth` 读取 Token 中的 `oid`
 8. `custom_auth` 用 `oid` 在 LiteLLM 用户表里做 upsert
 9. 如果用户不存在，就创建 LiteLLM Internal User
-10. 创建用户时设置：
+10. 创建或更新用户时设置：
 
 - `user_id = Entra oid`
 - `max_budget = 50`
 - `budget_duration = 7d`
 - `models = 允许访问的模型列表`
 
-11. LiteLLM 检查该用户的预算
-12. LiteLLM 将请求转发到 Vertex AI
-13. Vertex AI 返回结果
-14. LiteLLM 记录该 `user_id` 的花费
-15. LiteLLM 将结果返回给 OpenCode
-16. 用户看到模型输出
+11. `custom_auth` 确保存在一个共享 LiteLLM Team，并把该用户加入 team
+12. 当前请求返回的 `UserAPIKeyAuth` 会附带 `team_id`
+13. LiteLLM 先检查 team member budget / team budget，再检查模型权限
+14. LiteLLM 将请求转发到 Vertex AI
+15. Vertex AI 返回结果
+16. LiteLLM 同时累计 user spend 和 team spend
+17. LiteLLM 将结果返回给 OpenCode
+18. 用户看到模型输出
 
 如果用户选择兼容模式，客户端也可以继续走 Azure CLI。区别只是 token 的获取方式不同，服务端校验逻辑完全不变。
 
@@ -243,9 +250,11 @@ Authorization: Bearer <entra_access_token>
 - `iss` 不匹配
 - 用户不在允许的 Group 里
 
-## 9. 每周 50 美元额度如何生效
+## 9. 每周额度如何生效
 
-额度由 LiteLLM 控制，不由 Entra 控制。
+额度由 LiteLLM 控制，不由 Entra 控制。当前默认是两层：
+
+### 9.1 用户额度
 
 每个用户第一次进入系统时，`custom_auth` 会为其创建一个独立的 LiteLLM Internal User，并设置：
 
@@ -258,6 +267,22 @@ Authorization: Bearer <entra_access_token>
 - 每个用户独立记账
 - 每个用户每周最多 50 美元
 - 每周一上海时间 00:00 自动重置
+
+### 9.2 Team 共享额度
+
+同一个 Entra 准入组里的用户，还会被自动放进一个共享 LiteLLM Team。
+
+默认行为是：
+
+- `team_id = ENTRA_SHARED_TEAM_ID`
+- 如果没有显式配置 `ENTRA_SHARED_TEAM_ID`，并且只允许一个 Entra Group，则默认用这个 Group ID 作为 `team_id`
+- `team max_budget` 默认跟 `ENTRA_USER_MAX_BUDGET` 一致，也可以单独设置
+- `team member max_budget` 默认也跟 `ENTRA_USER_MAX_BUDGET` 一致
+
+这样 LiteLLM UI 里会同时看到：
+
+- user 维度的 spend / limit
+- team 维度的 spend / limit
 
 ## 10. 模型选择逻辑
 
