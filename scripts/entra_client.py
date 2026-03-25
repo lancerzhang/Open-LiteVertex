@@ -14,6 +14,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from entra_auth import DEFAULT_TOKEN_CACHE_PATH, EntraAuthError, acquire_access_token, default_login_mode
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -33,10 +35,6 @@ DEFAULT_REFRESH_SKEW_SECONDS = 300
 
 class CliError(RuntimeError):
     pass
-
-
-def _default_login_mode() -> str:
-    return "interactive" if os.name == "nt" else "device-code"
 
 
 def _load_dotenv(path: Path, *, missing_hint: str | None = None) -> dict[str, str]:
@@ -82,90 +80,14 @@ def _require_command(name: str, *, install_hint: str | None = None) -> str:
         message = f"{message} {install_hint}"
     raise CliError(message)
 
-
-def _run_json_command(command: list[str], *, env: dict[str, str] | None = None) -> tuple[dict[str, Any] | None, str]:
-    result = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
-    stderr = (result.stderr or "").strip()
-    if result.returncode != 0:
-        return None, stderr or "command failed"
-
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise CliError(f"Command returned invalid JSON: {' '.join(command)}") from exc
-    return payload, stderr
-
-
-def _login_with_azure_cli(az_path: str, tenant_id: str, scope: str, login_mode: str) -> None:
-    command = [az_path, "login", "--tenant", tenant_id, "--scope", scope]
-    if login_mode == "device-code":
-        command.append("--use-device-code")
-
-    completed = subprocess.run(command, check=False)
-    if completed.returncode != 0:
-        raise CliError("Azure CLI login failed.")
-
-
-def _normalize_token_payload(payload: dict[str, Any], *, tenant_id: str, client_id: str, scope: str) -> dict[str, Any]:
-    access_token = str(payload.get("accessToken", "")).strip()
-    if not access_token:
-        raise CliError("Azure CLI did not return an access token.")
-
-    expires_on_epoch = payload.get("expires_on")
-    if isinstance(expires_on_epoch, str) and expires_on_epoch.isdigit():
-        expires_on_epoch = int(expires_on_epoch)
-    if not isinstance(expires_on_epoch, int):
-        expires_on_epoch = None
-
-    expires_on = payload.get("expiresOn")
-    if not isinstance(expires_on, str) or not expires_on.strip():
-        expires_on = str(payload.get("expires_on", "")).strip()
-
-    tenant = payload.get("tenant")
-    if not isinstance(tenant, str) or not tenant.strip():
-        tenant = tenant_id
-
-    return {
-        "accessToken": access_token,
-        "expiresOn": expires_on,
-        "expiresOnEpoch": expires_on_epoch,
-        "tenant": tenant.strip(),
-        "clientId": client_id,
-        "scope": scope,
-    }
-
-
-def _acquire_access_token(*, tenant_id: str, client_id: str, scope: str, login_mode: str) -> dict[str, Any]:
-    az_path = _require_command("az", install_hint="Install Azure CLI first, then rerun this command.")
-    get_token_command = [
-        az_path,
-        "account",
-        "get-access-token",
-        "--tenant",
-        tenant_id,
-        "--scope",
-        scope,
-        "-o",
-        "json",
-    ]
-
-    payload, stderr = _run_json_command(get_token_command)
-    if payload is None:
-        _login_with_azure_cli(az_path=az_path, tenant_id=tenant_id, scope=scope, login_mode=login_mode)
-        payload, stderr = _run_json_command(get_token_command)
-        if payload is None:
-            raise CliError(f"Azure CLI could not fetch an access token. {stderr}".strip())
-
-    return _normalize_token_payload(payload, tenant_id=tenant_id, client_id=client_id, scope=scope)
-
-
-def _resolve_token_request(args: argparse.Namespace) -> tuple[str, str, str]:
+def _resolve_token_request(args: argparse.Namespace) -> tuple[str, str, str, str]:
     entra_env: dict[str, str] = {}
     if args.entra_env_path.exists():
         entra_env = _load_dotenv(args.entra_env_path)
 
     tenant_id = (args.tenant_id or entra_env.get("ENTRA_TENANT_ID", "")).strip()
     client_id = (args.client_id or entra_env.get("ENTRA_CLIENT_ID", "")).strip()
+    public_client_id = (args.public_client_id or entra_env.get("ENTRA_PUBLIC_CLIENT_ID", "")).strip()
     scope = (args.scope or entra_env.get("ENTRA_SCOPE", "")).strip()
 
     if not tenant_id or not client_id:
@@ -175,7 +97,7 @@ def _resolve_token_request(args: argparse.Namespace) -> tuple[str, str, str]:
     if not scope:
         scope = f"api://{client_id}/access_as_user"
 
-    return tenant_id, client_id, scope
+    return tenant_id, client_id, public_client_id, scope
 
 
 def _process_exists(pid: int) -> bool:
@@ -242,13 +164,23 @@ def _wait_for_healthcheck(host: str, port: int, *, timeout_seconds: int = 30) ->
     raise CliError(f"Broker process started but did not become healthy on {url}.")
 
 
-def _print_broker_status(pid: int, *, host: str, port: int, broker_api_key: str, expires_on: str, already_running: bool) -> None:
+def _print_broker_status(
+    pid: int,
+    *,
+    host: str,
+    port: int,
+    broker_api_key: str,
+    expires_on: str,
+    auth_mode: str,
+    already_running: bool,
+) -> None:
     state = "already running" if already_running else "started"
     connect_host = _broker_connect_host(host)
     print(f"Broker {state} on PID {pid}.")
     print(f"Broker bind host: {host}")
     print(f"Broker base URL: http://{connect_host}:{port}/v1")
     print(f"Broker API key: {broker_api_key}")
+    print(f"Auth mode: {auth_mode}")
     if expires_on:
         print(f"Initial Entra token expires on: {expires_on}")
     print(f"Broker stdout log: {STDOUT_LOG_PATH}")
@@ -270,16 +202,6 @@ def _start_broker(args: argparse.Namespace) -> int:
     _require_env_values(entra_env, ["ENTRA_TENANT_ID", "ENTRA_CLIENT_ID"], source_name=args.entra_env_path.name)
     _require_env_values(demo_env, ["LITELLM_BASE_URL"], source_name=args.demo_env_path.name)
 
-    tenant_id = entra_env["ENTRA_TENANT_ID"].strip()
-    client_id = entra_env["ENTRA_CLIENT_ID"].strip()
-    scope = entra_env.get("ENTRA_SCOPE", "").strip() or f"api://{client_id}/access_as_user"
-    token = _acquire_access_token(
-        tenant_id=tenant_id,
-        client_id=client_id,
-        scope=scope,
-        login_mode=args.login_mode,
-    )
-
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     existing_pid = _read_pid(PID_FILE_PATH)
     if existing_pid and _process_exists(existing_pid):
@@ -288,21 +210,40 @@ def _start_broker(args: argparse.Namespace) -> int:
             host=args.host,
             port=args.port,
             broker_api_key=args.broker_api_key,
-            expires_on=str(token.get("expiresOn", "")),
+            expires_on="",
+            auth_mode=args.auth_mode,
             already_running=True,
         )
         return 0
 
-    az_path = _require_command("az", install_hint="Install Azure CLI first, then rerun this command.")
+    tenant_id = entra_env["ENTRA_TENANT_ID"].strip()
+    client_id = entra_env["ENTRA_CLIENT_ID"].strip()
+    public_client_id = entra_env.get("ENTRA_PUBLIC_CLIENT_ID", "").strip()
+    scope = entra_env.get("ENTRA_SCOPE", "").strip() or f"api://{client_id}/access_as_user"
+    token = acquire_access_token(
+        tenant_id=tenant_id,
+        client_id=client_id,
+        scope=scope,
+        auth_mode=args.auth_mode,
+        login_mode=args.login_mode,
+        public_client_id=public_client_id,
+        token_cache_path=args.token_cache_path,
+        refresh_skew_seconds=DEFAULT_REFRESH_SKEW_SECONDS,
+    )
+    resolved_auth_mode = str(token.get("authMode", "")).strip() or "unknown"
+
     env = _merge_env(entra_env, demo_env)
     env["BROKER_HOST"] = args.host
     env["BROKER_PORT"] = str(args.port)
     env["BROKER_LOG_LEVEL"] = "info"
     env["BROKER_UPSTREAM_BASE_URL"] = demo_env["LITELLM_BASE_URL"].strip().rstrip("/")
     env["ENTRA_SCOPE"] = scope
+    env["ENTRA_AUTH_MODE"] = args.auth_mode
+    env["ENTRA_PUBLIC_CLIENT_ID"] = public_client_id
+    env["ENTRA_AZURE_CLI_LOGIN_MODE"] = args.login_mode
+    env["ENTRA_TOKEN_CACHE_PATH"] = str(args.token_cache_path)
     env["ENTRA_BROKER_API_KEY"] = args.broker_api_key
     env["BROKER_REFRESH_SKEW_SECONDS"] = str(DEFAULT_REFRESH_SKEW_SECONDS)
-    env["AZ_PATH"] = az_path
 
     process = _start_background_process(
         [sys.executable, str(BROKER_SCRIPT_PATH)],
@@ -326,6 +267,7 @@ def _start_broker(args: argparse.Namespace) -> int:
         port=args.port,
         broker_api_key=args.broker_api_key,
         expires_on=str(token.get("expiresOn", "")),
+        auth_mode=resolved_auth_mode,
         already_running=False,
     )
     return 0
@@ -390,12 +332,16 @@ def _run_opencode_direct(args: argparse.Namespace) -> int:
 
     tenant_id = entra_env["ENTRA_TENANT_ID"].strip()
     client_id = entra_env["ENTRA_CLIENT_ID"].strip()
+    public_client_id = entra_env.get("ENTRA_PUBLIC_CLIENT_ID", "").strip()
     scope = entra_env.get("ENTRA_SCOPE", "").strip() or f"api://{client_id}/access_as_user"
-    token = _acquire_access_token(
+    token = acquire_access_token(
         tenant_id=tenant_id,
         client_id=client_id,
         scope=scope,
+        auth_mode=args.auth_mode,
         login_mode=args.login_mode,
+        public_client_id=public_client_id,
+        token_cache_path=args.token_cache_path,
     )
 
     opencode_env = _merge_env(entra_env, demo_env)
@@ -416,9 +362,11 @@ def _run_opencode_broker(args: argparse.Namespace) -> int:
         port=args.port,
         host=args.host,
         broker_api_key=args.broker_api_key,
+        auth_mode=args.auth_mode,
         login_mode=args.login_mode,
         entra_env_path=args.entra_env_path,
         demo_env_path=args.demo_env_path,
+        token_cache_path=args.token_cache_path,
     )
     _start_broker(start_args)
 
@@ -431,12 +379,15 @@ def _run_opencode_broker(args: argparse.Namespace) -> int:
 
 
 def _get_token(args: argparse.Namespace) -> int:
-    tenant_id, client_id, scope = _resolve_token_request(args)
-    token = _acquire_access_token(
+    tenant_id, client_id, public_client_id, scope = _resolve_token_request(args)
+    token = acquire_access_token(
         tenant_id=tenant_id,
         client_id=client_id,
         scope=scope,
+        auth_mode=args.auth_mode,
         login_mode=args.login_mode,
+        public_client_id=public_client_id,
+        token_cache_path=args.token_cache_path,
     )
     print(json.dumps(token))
     return 0
@@ -446,11 +397,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cross-platform client helpers for Entra-authenticated LiteLLM access.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    token_parser = subparsers.add_parser("get-token", help="Fetch an Entra access token via Azure CLI.")
+    token_parser = subparsers.add_parser("get-token", help="Fetch an Entra access token via device code or Azure CLI.")
     token_parser.add_argument("--tenant-id")
     token_parser.add_argument("--client-id")
+    token_parser.add_argument("--public-client-id")
     token_parser.add_argument("--scope")
-    token_parser.add_argument("--login-mode", choices=["interactive", "device-code"], default=_default_login_mode())
+    token_parser.add_argument("--auth-mode", choices=["auto", "device-code", "azure-cli"], default="auto")
+    token_parser.add_argument("--login-mode", choices=["interactive", "device-code"], default=default_login_mode())
+    token_parser.add_argument("--token-cache-path", type=Path, default=DEFAULT_TOKEN_CACHE_PATH)
     token_parser.add_argument("--entra-env-path", type=Path, default=ENTRA_ENV_PATH)
     token_parser.set_defaults(handler=_get_token)
 
@@ -458,18 +412,22 @@ def _build_parser() -> argparse.ArgumentParser:
     start_broker_parser.add_argument("--port", type=int, default=DEFAULT_BROKER_PORT)
     start_broker_parser.add_argument("--host", default=DEFAULT_BROKER_HOST)
     start_broker_parser.add_argument("--broker-api-key", default=DEFAULT_BROKER_API_KEY)
-    start_broker_parser.add_argument("--login-mode", choices=["interactive", "device-code"], default=_default_login_mode())
+    start_broker_parser.add_argument("--auth-mode", choices=["auto", "device-code", "azure-cli"], default="auto")
+    start_broker_parser.add_argument("--login-mode", choices=["interactive", "device-code"], default=default_login_mode())
     start_broker_parser.add_argument("--entra-env-path", type=Path, default=ENTRA_ENV_PATH)
     start_broker_parser.add_argument("--demo-env-path", type=Path, default=DEMO_ENV_PATH)
+    start_broker_parser.add_argument("--token-cache-path", type=Path, default=DEFAULT_TOKEN_CACHE_PATH)
     start_broker_parser.set_defaults(handler=_start_broker)
 
     stop_broker_parser = subparsers.add_parser("stop-broker", help="Stop the local Entra broker.")
     stop_broker_parser.set_defaults(handler=_stop_broker)
 
     run_direct_parser = subparsers.add_parser("run-opencode-direct", help="Run opencode with a direct Entra access token.")
-    run_direct_parser.add_argument("--login-mode", choices=["interactive", "device-code"], default=_default_login_mode())
+    run_direct_parser.add_argument("--auth-mode", choices=["auto", "device-code", "azure-cli"], default="auto")
+    run_direct_parser.add_argument("--login-mode", choices=["interactive", "device-code"], default=default_login_mode())
     run_direct_parser.add_argument("--entra-env-path", type=Path, default=ENTRA_ENV_PATH)
     run_direct_parser.add_argument("--demo-env-path", type=Path, default=DEMO_ENV_PATH)
+    run_direct_parser.add_argument("--token-cache-path", type=Path, default=DEFAULT_TOKEN_CACHE_PATH)
     run_direct_parser.add_argument("opencode_args", nargs=argparse.REMAINDER)
     run_direct_parser.set_defaults(handler=_run_opencode_direct)
 
@@ -477,9 +435,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run_broker_parser.add_argument("--port", type=int, default=DEFAULT_BROKER_PORT)
     run_broker_parser.add_argument("--host", default=DEFAULT_BROKER_HOST)
     run_broker_parser.add_argument("--broker-api-key", default=DEFAULT_BROKER_API_KEY)
-    run_broker_parser.add_argument("--login-mode", choices=["interactive", "device-code"], default=_default_login_mode())
+    run_broker_parser.add_argument("--auth-mode", choices=["auto", "device-code", "azure-cli"], default="auto")
+    run_broker_parser.add_argument("--login-mode", choices=["interactive", "device-code"], default=default_login_mode())
     run_broker_parser.add_argument("--entra-env-path", type=Path, default=ENTRA_ENV_PATH)
     run_broker_parser.add_argument("--demo-env-path", type=Path, default=DEMO_ENV_PATH)
+    run_broker_parser.add_argument("--token-cache-path", type=Path, default=DEFAULT_TOKEN_CACHE_PATH)
     run_broker_parser.add_argument("opencode_args", nargs=argparse.REMAINDER)
     run_broker_parser.set_defaults(handler=_run_opencode_broker)
 
@@ -492,6 +452,9 @@ def main() -> int:
     try:
         return int(args.handler(args))
     except CliError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except EntraAuthError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except KeyboardInterrupt:

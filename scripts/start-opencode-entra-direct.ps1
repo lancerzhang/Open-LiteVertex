@@ -1,5 +1,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
+    [ValidateSet("auto", "device-code", "azure-cli")]
+    [string]$AuthMode = "auto",
     [switch]$UseDeviceCode,
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -23,6 +25,7 @@ $loginMode = if ($UseDeviceCode) { "device-code" } else { "interactive" }
 
 & $python $clientScript `
     "run-opencode-direct" `
+    "--auth-mode" $AuthMode `
     "--login-mode" $loginMode `
     "--" @Args
 

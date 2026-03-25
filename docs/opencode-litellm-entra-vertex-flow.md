@@ -36,6 +36,29 @@
 
 这段代码不负责模型推理，也不负责计费计算。
 
+### 3.1 本地 Broker 的作用
+
+在 Linux 无界面或长生命周期会话里，OpenCode 直接自己管理 Entra token 会比较麻烦，所以项目里提供了一个本地 broker 作为客户端辅助层。
+
+这个 broker 运行在用户自己的机器上，不部署在 GKE 上，职责很窄：
+
+- 优先通过单独的 Entra public client app 走原生 device code flow 登录
+- 把 device code flow 拿到的 refresh token 缓存在本地，后续自动刷新 access token
+- 如果没有 `ENTRA_PUBLIC_CLIENT_ID`，或者用户显式要求兼容模式，就回退到 Azure CLI
+- 监听一个本地 OpenAI-compatible endpoint
+- 收到请求后先补上 `Authorization: Bearer <entra_access_token>`
+- 再把请求转发给真正的 LiteLLM 服务
+
+这样做的结果是：
+
+- OpenCode 只需要连本地 `localhost`
+- token 刷新逻辑从 OpenCode 配置里剥离出来
+- 服务端认证模型仍然保持不变，还是 LiteLLM `custom_auth`
+
+本地 broker 的请求链路如下：
+
+`OpenCode -> local broker -> LiteLLM OSS(custom_auth) -> Vertex AI`
+
 ## 4. 各组件职责
 
 ### 4.1 OpenCode
@@ -72,6 +95,14 @@
 - 在 Access Token 中下发用户身份信息
 - 在 Token 中下发 `groups`
 
+### 4.6 Local Broker
+
+- 从原生 device code flow 或 Azure CLI 获取 Entra access token
+- 在 token 快过期时自动刷新
+- 把 `OpenCode` 的请求转发到 LiteLLM
+- 为请求补上 `Authorization: Bearer <entra_access_token>`
+- 让 headless Linux 上的 `OpenCode` 仍然能用 Entra 登录
+
 ## 5. 当前项目已经完成的部分
 
 当前已经在 GCP 上部署并验证：
@@ -87,6 +118,7 @@
 
 - 真实的 Entra Tenant / App / Group 配置值
 - OpenCode 用 Entra Access Token 调 LiteLLM 的正式认证链路
+- 本地 broker 默认运行方式的长期运维规范
 
 ## 6. 管理员初始化流程
 
@@ -107,11 +139,12 @@
 
 管理员运行：
 
-[scripts/setup-entra-oss.ps1](D:/ws/vertex-dev/scripts/setup-entra-oss.ps1)
+[scripts/setup-entra-oss.ps1](../scripts/setup-entra-oss.ps1)
 
 这个脚本会创建或复用：
 
 - 一个 Entra API App
+- 一个单独的 Entra public client app，专门给 device code 登录使用
 - 一个允许访问的安全组，例如 `opencode-users`
 - 可选把用户加入该组
 
@@ -119,6 +152,7 @@
 
 - `ENTRA_TENANT_ID`
 - `ENTRA_CLIENT_ID`
+- `ENTRA_PUBLIC_CLIENT_ID`
 - `ENTRA_ALLOWED_GROUP_ID`
 - `ENTRA_SCOPE`
 - `ENTRA_ISSUER`
@@ -143,9 +177,12 @@
 
 1. 用户打开 OpenCode
 2. OpenCode 需要拿到一个 Entra Access Token
-3. 用户在浏览器里完成 Entra 登录
-4. Entra 返回 Access Token
-5. OpenCode 后续请求都把这个 Token 当成 LiteLLM 的 Bearer Token
+3. 如果本地已有 refresh token，就直接静默刷新
+4. 如果没有，就在终端显示 Microsoft Entra 返回的验证链接和 user code
+5. 用户在任意有浏览器的设备上完成验证
+6. Entra 返回 Access Token 和 Refresh Token
+7. 客户端把 Refresh Token 安全地缓存在本地，后续自动刷新
+8. OpenCode 后续请求都把这个 Token 当成 LiteLLM 的 Bearer Token
 
 请求头示例：
 
@@ -177,6 +214,8 @@ Authorization: Bearer <entra_access_token>
 14. LiteLLM 记录该 `user_id` 的花费
 15. LiteLLM 将结果返回给 OpenCode
 16. 用户看到模型输出
+
+如果用户选择兼容模式，客户端也可以继续走 Azure CLI。区别只是 token 的获取方式不同，服务端校验逻辑完全不变。
 
 ### 7.3 用户后续请求
 

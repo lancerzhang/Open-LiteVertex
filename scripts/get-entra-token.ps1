@@ -1,9 +1,12 @@
 param(
-    [Parameter(Mandatory = $true)]
     [string]$TenantId,
 
-    [Parameter(Mandatory = $true)]
     [string]$ClientId,
+
+    [string]$PublicClientId,
+
+    [ValidateSet("auto", "device-code", "azure-cli")]
+    [string]$AuthMode = "auto",
 
     [switch]$UseDeviceCode,
 
@@ -27,10 +30,21 @@ $loginMode = if ($UseDeviceCode) { "device-code" } else { "interactive" }
 $commandArgs = @(
     $clientScript,
     "get-token",
-    "--tenant-id", $TenantId,
-    "--client-id", $ClientId,
+    "--auth-mode", $AuthMode,
     "--login-mode", $loginMode
 )
+
+if ($TenantId) {
+    $commandArgs += @("--tenant-id", $TenantId)
+}
+
+if ($ClientId) {
+    $commandArgs += @("--client-id", $ClientId)
+}
+
+if ($PublicClientId) {
+    $commandArgs += @("--public-client-id", $PublicClientId)
+}
 
 if ($Scope) {
     $commandArgs += @("--scope", $Scope)

@@ -2,6 +2,8 @@ param(
     [int]$Port = 8787,
     [string]$BrokerApiKey = "opencode-local-broker-key",
     [string]$Host = "127.0.0.1",
+    [ValidateSet("auto", "device-code", "azure-cli")]
+    [string]$AuthMode = "auto",
     [switch]$UseDeviceCode
 )
 
@@ -25,6 +27,7 @@ $loginMode = if ($UseDeviceCode) { "device-code" } else { "interactive" }
     "--port" $Port `
     "--host" $Host `
     "--broker-api-key" $BrokerApiKey `
+    "--auth-mode" $AuthMode `
     "--login-mode" $loginMode
 
 exit $LASTEXITCODE

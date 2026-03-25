@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 import httpx
@@ -13,6 +12,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
+
+from entra_auth import EntraAuthError, acquire_access_token
 
 
 HOP_BY_HOP_HEADERS = {
@@ -73,11 +74,28 @@ class TokenBundle:
 
 
 class EntraTokenCache:
-    def __init__(self, tenant_id: str, client_id: str, scope: str, refresh_skew_seconds: int) -> None:
+    def __init__(
+        self,
+        tenant_id: str,
+        client_id: str,
+        scope: str,
+        refresh_skew_seconds: int,
+        *,
+        auth_mode: str,
+        public_client_id: str,
+        login_mode: str,
+        token_cache_path: str,
+        az_path: str,
+    ) -> None:
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.scope = scope
         self.refresh_skew_seconds = refresh_skew_seconds
+        self.auth_mode = auth_mode
+        self.public_client_id = public_client_id
+        self.login_mode = login_mode
+        self.token_cache_path = token_cache_path
+        self.az_path = az_path
         self._lock = asyncio.Lock()
         self._bundle: TokenBundle | None = None
 
@@ -99,49 +117,36 @@ class EntraTokenCache:
             return self._bundle.access_token
 
     def _fetch_token(self) -> TokenBundle:
-        command = [
-            AZ_PATH,
-            "account",
-            "get-access-token",
-            "--tenant",
-            self.tenant_id,
-            "--scope",
-            self.scope,
-            "-o",
-            "json",
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            stderr = (result.stderr or "").strip()
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "Unable to refresh Entra access token via Azure CLI. "
-                    "Run scripts/get-entra-token.ps1 on Windows, scripts/get-entra-token.sh on Linux, "
-                    "or python scripts/entra_client.py get-token once to complete login. "
-                    f"Azure CLI said: {stderr}"
-                ),
-            )
-
         try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
+            payload = acquire_access_token(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                scope=self.scope,
+                auth_mode=self.auth_mode,
+                login_mode=self.login_mode,
+                public_client_id=self.public_client_id,
+                token_cache_path=None if not self.token_cache_path else Path(self.token_cache_path),
+                refresh_skew_seconds=self.refresh_skew_seconds,
+                allow_user_interaction=False,
+                az_path=self.az_path,
+            )
+        except EntraAuthError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Azure CLI returned invalid JSON while refreshing the Entra access token.",
+                detail=str(exc),
             ) from exc
 
         access_token = payload.get("accessToken")
-        expires_at_epoch = payload.get("expires_on")
+        expires_at_epoch = payload.get("expiresOnEpoch")
         if not isinstance(access_token, str) or not access_token.strip():
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Azure CLI did not return an access token.",
+                detail="Entra auth provider did not return an access token.",
             )
         if not isinstance(expires_at_epoch, int):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Azure CLI did not return expires_on for the access token.",
+                detail="Entra auth provider did not return expiresOnEpoch for the access token.",
             )
 
         return TokenBundle(access_token=access_token.strip(), expires_at_epoch=expires_at_epoch)
@@ -153,6 +158,10 @@ CLIENT_ID = _require_env("ENTRA_CLIENT_ID")
 SCOPE = os.getenv("ENTRA_SCOPE", "").strip() or f"api://{CLIENT_ID}/access_as_user"
 LOCAL_API_KEY = os.getenv("ENTRA_BROKER_API_KEY", "").strip()
 REFRESH_SKEW_SECONDS = int(os.getenv("BROKER_REFRESH_SKEW_SECONDS", "300"))
+AUTH_MODE = os.getenv("ENTRA_AUTH_MODE", "auto").strip() or "auto"
+PUBLIC_CLIENT_ID = os.getenv("ENTRA_PUBLIC_CLIENT_ID", "").strip()
+AZURE_CLI_LOGIN_MODE = os.getenv("ENTRA_AZURE_CLI_LOGIN_MODE", "device-code").strip() or "device-code"
+TOKEN_CACHE_PATH = os.getenv("ENTRA_TOKEN_CACHE_PATH", "").strip()
 AZ_PATH = os.getenv("AZ_PATH", "").strip() or "az"
 
 app = FastAPI(title="Entra LiteLLM Broker")
@@ -161,6 +170,11 @@ token_cache = EntraTokenCache(
     client_id=CLIENT_ID,
     scope=SCOPE,
     refresh_skew_seconds=REFRESH_SKEW_SECONDS,
+    auth_mode=AUTH_MODE,
+    public_client_id=PUBLIC_CLIENT_ID,
+    login_mode=AZURE_CLI_LOGIN_MODE,
+    token_cache_path=TOKEN_CACHE_PATH,
+    az_path=AZ_PATH,
 )
 http_client = httpx.AsyncClient(timeout=None, follow_redirects=False)
 

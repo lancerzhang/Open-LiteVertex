@@ -1,6 +1,7 @@
 param(
     [string]$TenantId,
     [string]$ApiAppName = "opencode-vertex-gateway-api",
+    [string]$PublicClientAppName = "opencode-vertex-gateway-public-client",
     [string]$AllowedGroupName = "opencode-users",
     [string[]]$MemberUpns = @(),
     [string]$OutputEnvPath = ".entra.env",
@@ -206,7 +207,7 @@ foreach ($upn in $MemberUpns) {
 $app = Get-JsonObject (
     az ad app list `
         --display-name $ApiAppName `
-        --query "[0].{id:id,appId:appId,displayName:displayName}" `
+        --query "[0].{id:id,appId:appId,displayName:displayName,scopes:api.oauth2PermissionScopes}" `
         -o json
 )
 
@@ -214,7 +215,7 @@ if (-not $app) {
     $app = az ad app create `
         --display-name $ApiAppName `
         --sign-in-audience AzureADMyOrg `
-        --query "{id:id,appId:appId,displayName:displayName}" `
+        --query "{id:id,appId:appId,displayName:displayName,scopes:api.oauth2PermissionScopes}" `
         -o json | ConvertFrom-Json
 }
 
@@ -227,7 +228,17 @@ if (-not $spId) {
     $spId = az ad sp create --id $app.appId --query id -o tsv
 }
 
-$scopeId = [Guid]::NewGuid().ToString()
+$scopeId = $null
+if ($app.scopes) {
+    $existingScope = @($app.scopes) | Where-Object { $_.value -eq "access_as_user" } | Select-Object -First 1
+    if ($existingScope) {
+        $scopeId = $existingScope.id
+    }
+}
+if (-not $scopeId) {
+    $scopeId = [Guid]::NewGuid().ToString()
+}
+
 $patchBody = @{
     identifierUris = @("api://$($app.appId)")
     groupMembershipClaims = "SecurityGroup"
@@ -253,6 +264,50 @@ Invoke-AzRestJson `
     -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)" `
     -Body $patchBody | Out-Null
 
+$publicClientApp = Get-JsonObject (
+    az ad app list `
+        --display-name $PublicClientAppName `
+        --query "[0].{id:id,appId:appId,displayName:displayName}" `
+        -o json
+)
+
+if (-not $publicClientApp) {
+    $publicClientApp = az ad app create `
+        --display-name $PublicClientAppName `
+        --sign-in-audience AzureADMyOrg `
+        --query "{id:id,appId:appId,displayName:displayName}" `
+        -o json | ConvertFrom-Json
+}
+
+$publicClientPatchBody = @{
+    isFallbackPublicClient = $true
+    requiredResourceAccess = @(
+        @{
+            resourceAppId = $app.appId
+            resourceAccess = @(
+                @{
+                    id = $scopeId
+                    type = "Scope"
+                }
+            )
+        }
+    )
+} | ConvertTo-Json -Depth 20 -Compress
+
+Invoke-AzRestJson `
+    -Method "PATCH" `
+    -Uri "https://graph.microsoft.com/v1.0/applications/$($publicClientApp.id)" `
+    -Body $publicClientPatchBody | Out-Null
+
+$publicClientSpId = az ad sp list `
+    --filter "appId eq '$($publicClientApp.appId)'" `
+    --query "[0].id" `
+    -o tsv
+
+if (-not $publicClientSpId) {
+    $publicClientSpId = az ad sp create --id $publicClientApp.appId --query id -o tsv
+}
+
 $issuer = "https://login.microsoftonline.com/$effectiveTenantId/v2.0"
 $jwksUri = "https://login.microsoftonline.com/$effectiveTenantId/discovery/v2.0/keys"
 $scope = "api://$($app.appId)/access_as_user"
@@ -260,6 +315,7 @@ $scope = "api://$($app.appId)/access_as_user"
 $lines = @(
     "ENTRA_TENANT_ID=$effectiveTenantId",
     "ENTRA_CLIENT_ID=$($app.appId)",
+    "ENTRA_PUBLIC_CLIENT_ID=$($publicClientApp.appId)",
     "ENTRA_ALLOWED_GROUP_ID=$($group.id)",
     "ENTRA_SCOPE=$scope",
     "ENTRA_ISSUER=$issuer",
@@ -272,7 +328,8 @@ Set-Content -Path $OutputEnvPath -Value ($lines -join "`n") -NoNewline
 Write-Host ""
 Write-Host "Entra setup completed."
 Write-Host "Tenant ID : $effectiveTenantId"
-Write-Host "Client ID : $($app.appId)"
-Write-Host "Group ID  : $($group.id)"
-Write-Host "Scope     : $scope"
-Write-Host "Env file  : $(Resolve-Path $OutputEnvPath)"
+Write-Host "API App ID       : $($app.appId)"
+Write-Host "Public Client ID : $($publicClientApp.appId)"
+Write-Host "Group ID         : $($group.id)"
+Write-Host "Scope            : $scope"
+Write-Host "Env file         : $(Resolve-Path $OutputEnvPath)"
