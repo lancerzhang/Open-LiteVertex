@@ -16,9 +16,9 @@ model_list:
       model: vertex_ai/gemini-3-pro-preview
       vertex_location: global
 
-  - model_name: vertex-claude-sonnet-4-5
+  - model_name: vertex-claude-sonnet-4-6
     litellm_params:
-      model: vertex_ai/claude-sonnet-4-5@20250929
+      model: vertex_ai/claude-sonnet-4-6@default
       vertex_location: global
 
 litellm_settings:
@@ -35,7 +35,7 @@ litellm_settings:
       - vertex-gemini-2.5-flash-lite
       - vertex-gemini-2.5-pro
       - vertex-gemini-3-pro-preview
-      - vertex-claude-sonnet-4-5
+      - vertex-claude-sonnet-4-6
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

@@ -271,7 +271,7 @@ OpenCode 里展示你允许用户看到的模型名称，例如：
 - `vertex-gemini-2.5-flash-lite`
 - `vertex-gemini-2.5-pro`
 - `vertex-gemini-3-pro-preview`
-- `vertex-claude-sonnet-4-5`
+- `vertex-claude-sonnet-4-6`
 
 ### 10.2 LiteLLM 执行层
 
@@ -281,7 +281,7 @@ LiteLLM 把这些模型别名映射到真实的 Vertex AI 模型，例如：
 - `vertex-gemini-2.5-flash-lite -> vertex_ai/gemini-2.5-flash-lite`
 - `vertex-gemini-2.5-pro -> vertex_ai/gemini-2.5-pro`
 - `vertex-gemini-3-pro-preview -> vertex_ai/gemini-3-pro-preview`
-- `vertex-claude-sonnet-4-5 -> vertex_ai/claude-sonnet-4-5@20250929`
+- `vertex-claude-sonnet-4-6 -> vertex_ai/claude-sonnet-4-6@default`
 
 ## 11. 时序图
 

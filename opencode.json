@@ -24,8 +24,8 @@
         "vertex-gemini-3-pro-preview": {
           "name": "Gemini 3 Pro Preview"
         },
-        "vertex-claude-sonnet-4-5": {
-          "name": "Claude Sonnet 4.5"
+        "vertex-claude-sonnet-4-6": {
+          "name": "Claude Sonnet 4.6"
         }
       }
     }

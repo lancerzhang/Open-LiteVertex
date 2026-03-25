@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -23,7 +24,9 @@ SECRETS_DIR = ROOT_DIR / ".secrets"
 ENTRA_ENV_PATH = ROOT_DIR / ".entra.env"
 DEMO_ENV_PATH = ROOT_DIR / ".demo.env"
 BROKER_SCRIPT_PATH = SCRIPTS_DIR / "entra_litellm_broker.py"
+ENTRA_AUTH_SCRIPT_PATH = SCRIPTS_DIR / "entra_auth.py"
 PID_FILE_PATH = SECRETS_DIR / "entra-broker.pid"
+META_FILE_PATH = SECRETS_DIR / "entra-broker.meta.json"
 STDOUT_LOG_PATH = SECRETS_DIR / "entra-broker.stdout.log"
 STDERR_LOG_PATH = SECRETS_DIR / "entra-broker.stderr.log"
 
@@ -126,6 +129,56 @@ def _broker_connect_host(bind_host: str) -> str:
     return bind_host
 
 
+def _file_digest(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _build_broker_runtime_fingerprint(
+    *,
+    host: str,
+    port: int,
+    broker_api_key: str,
+    auth_mode: str,
+    login_mode: str,
+    token_cache_path: Path,
+    entra_env_path: Path,
+    demo_env_path: Path,
+) -> str:
+    payload = {
+        "host": host,
+        "port": port,
+        "broker_api_key": broker_api_key,
+        "auth_mode": auth_mode,
+        "login_mode": login_mode,
+        "token_cache_path": str(token_cache_path),
+        "entra_env_path": str(entra_env_path),
+        "demo_env_path": str(demo_env_path),
+        "broker_script_digest": _file_digest(BROKER_SCRIPT_PATH),
+        "entra_auth_script_digest": _file_digest(ENTRA_AUTH_SCRIPT_PATH),
+        "entra_env_digest": _file_digest(entra_env_path),
+        "demo_env_digest": _file_digest(demo_env_path),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _read_broker_meta(meta_file: Path) -> dict[str, Any] | None:
+    if not meta_file.exists():
+        return None
+    try:
+        payload = json.loads(meta_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _write_broker_meta(meta_file: Path, payload: dict[str, Any]) -> None:
+    meta_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def _start_background_process(command: list[str], *, cwd: Path, env: dict[str, str], stdout_path: Path, stderr_path: Path) -> subprocess.Popen[Any]:
     stdout_handle = stdout_path.open("a", encoding="utf-8")
     stderr_handle = stderr_path.open("a", encoding="utf-8")
@@ -204,17 +257,44 @@ def _start_broker(args: argparse.Namespace) -> int:
 
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     existing_pid = _read_pid(PID_FILE_PATH)
+    current_fingerprint = _build_broker_runtime_fingerprint(
+        host=args.host,
+        port=args.port,
+        broker_api_key=args.broker_api_key,
+        auth_mode=args.auth_mode,
+        login_mode=args.login_mode,
+        token_cache_path=args.token_cache_path,
+        entra_env_path=args.entra_env_path,
+        demo_env_path=args.demo_env_path,
+    )
     if existing_pid and _process_exists(existing_pid):
-        _print_broker_status(
-            existing_pid,
-            host=args.host,
-            port=args.port,
-            broker_api_key=args.broker_api_key,
-            expires_on="",
-            auth_mode=args.auth_mode,
-            already_running=True,
-        )
-        return 0
+        meta = _read_broker_meta(META_FILE_PATH)
+        existing_fingerprint = str((meta or {}).get("fingerprint", "")).strip()
+        needs_restart = existing_fingerprint != current_fingerprint
+        if not needs_restart:
+            try:
+                _wait_for_healthcheck(args.host, args.port, timeout_seconds=3)
+            except CliError:
+                needs_restart = True
+
+        if needs_restart:
+            if _stop_process(existing_pid):
+                print(f"Restarting broker PID {existing_pid} because its runtime configuration changed.")
+            else:
+                print(f"Broker PID {existing_pid} is stale. Starting a fresh broker process.")
+            PID_FILE_PATH.unlink(missing_ok=True)
+            META_FILE_PATH.unlink(missing_ok=True)
+        else:
+            _print_broker_status(
+                existing_pid,
+                host=args.host,
+                port=args.port,
+                broker_api_key=args.broker_api_key,
+                expires_on="",
+                auth_mode=args.auth_mode,
+                already_running=True,
+            )
+            return 0
 
     tenant_id = entra_env["ENTRA_TENANT_ID"].strip()
     client_id = entra_env["ENTRA_CLIENT_ID"].strip()
@@ -253,12 +333,24 @@ def _start_broker(args: argparse.Namespace) -> int:
         stderr_path=STDERR_LOG_PATH,
     )
     PID_FILE_PATH.write_text(str(process.pid), encoding="utf-8")
+    _write_broker_meta(
+        META_FILE_PATH,
+        {
+            "pid": process.pid,
+            "fingerprint": current_fingerprint,
+            "host": args.host,
+            "port": args.port,
+            "auth_mode": args.auth_mode,
+            "login_mode": args.login_mode,
+        },
+    )
 
     try:
         _wait_for_healthcheck(args.host, args.port)
     except Exception:
         _stop_process(process.pid)
         PID_FILE_PATH.unlink(missing_ok=True)
+        META_FILE_PATH.unlink(missing_ok=True)
         raise
 
     _print_broker_status(
@@ -303,6 +395,7 @@ def _stop_broker(_: argparse.Namespace) -> int:
         print(f"Broker process {pid} is not running.")
 
     PID_FILE_PATH.unlink(missing_ok=True)
+    META_FILE_PATH.unlink(missing_ok=True)
     return 0
 
 

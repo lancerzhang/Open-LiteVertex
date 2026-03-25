@@ -67,6 +67,42 @@ def _filter_response_headers(headers: httpx.Headers) -> dict[str, str]:
     return filtered
 
 
+async def _send_upstream_with_retry(
+    request: Request,
+    *,
+    upstream_url: str,
+    body: bytes,
+    headers: dict[str, str],
+) -> httpx.Response:
+    last_error: httpx.HTTPError | None = None
+    for attempt in range(2):
+        upstream_request = http_client.build_request(
+            request.method,
+            upstream_url,
+            content=body,
+            headers=headers,
+            params=list(request.query_params.multi_items()),
+        )
+        try:
+            return await http_client.send(upstream_request, stream=True)
+        except httpx.TransportError as exc:
+            last_error = exc
+            if attempt == 0:
+                continue
+            break
+        except httpx.HTTPError as exc:
+            last_error = exc
+            break
+
+    detail = "Unable to reach the upstream LiteLLM service."
+    if last_error is not None:
+        detail = f"{detail} {last_error}"
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=detail,
+    )
+
+
 @dataclass
 class TokenBundle:
     access_token: str
@@ -176,7 +212,11 @@ token_cache = EntraTokenCache(
     token_cache_path=TOKEN_CACHE_PATH,
     az_path=AZ_PATH,
 )
-http_client = httpx.AsyncClient(timeout=None, follow_redirects=False)
+http_client = httpx.AsyncClient(
+    timeout=None,
+    follow_redirects=False,
+    limits=httpx.Limits(max_keepalive_connections=0, max_connections=100),
+)
 
 
 @app.on_event("shutdown")
@@ -211,14 +251,12 @@ async def proxy_request(path: str, request: Request) -> Response:
     headers["Authorization"] = f"Bearer {access_token}"
 
     upstream_url = f"{UPSTREAM_BASE_URL}/{path.lstrip('/')}"
-    upstream_request = http_client.build_request(
-        request.method,
-        upstream_url,
-        content=body,
+    upstream_response = await _send_upstream_with_retry(
+        request,
+        upstream_url=upstream_url,
+        body=body,
         headers=headers,
-        params=list(request.query_params.multi_items()),
     )
-    upstream_response = await http_client.send(upstream_request, stream=True)
     response_headers = _filter_response_headers(upstream_response.headers)
     content_type = upstream_response.headers.get("content-type", "")
 
