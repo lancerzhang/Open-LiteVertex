@@ -1,0 +1,23 @@
+# Merge these settings into config/litellm-config.yaml after you have
+# a LiteLLM Enterprise license and your Entra app details.
+#
+# Required environment variables:
+# - LITELLM_LICENSE
+# - JWT_PUBLIC_KEY_URL=https://login.microsoftonline.com/<TENANT_ID>/discovery/v2.0/keys
+# - JWT_AUDIENCE=<ENTRA_CLIENT_ID>
+
+general_settings:
+  enable_jwt_auth: true
+  litellm_jwtauth:
+    user_id_jwt_field: "oid"
+    user_email_jwt_field: "preferred_username"
+    team_ids_jwt_field: "groups"
+    user_id_upsert: true
+    enforce_team_based_model_access: true
+
+# With this mode enabled:
+# - create one LiteLLM team per allowed Entra group ID
+# - use team_id == Entra group object ID
+# - attach the allowed models to that team
+# - requests succeed only if any group in the JWT matches a LiteLLM team
+

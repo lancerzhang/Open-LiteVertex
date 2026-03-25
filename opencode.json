@@ -1,0 +1,29 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "enabled_providers": [
+    "litellm"
+  ],
+  "provider": {
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM Vertex Demo",
+      "options": {
+        "baseURL": "{env:LITELLM_OPENAI_BASE_URL}",
+        "apiKey": "{env:LITELLM_API_KEY}"
+      },
+      "models": {
+        "vertex-gemini-2.5-flash": {
+          "name": "Gemini 2.5 Flash"
+        },
+        "vertex-gemini-2.5-flash-lite": {
+          "name": "Gemini 2.5 Flash Lite"
+        },
+        "vertex-gemini-2.5-pro": {
+          "name": "Gemini 2.5 Pro"
+        }
+      }
+    }
+  },
+  "model": "litellm/vertex-gemini-2.5-flash-lite",
+  "small_model": "litellm/vertex-gemini-2.5-flash-lite"
+}

@@ -1,0 +1,7 @@
+.git
+.secrets
+.venv
+__pycache__/
+*.pyc
+.demo.env
+.entra.env

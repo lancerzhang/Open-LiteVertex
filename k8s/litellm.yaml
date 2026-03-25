@@ -1,0 +1,150 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: litellm-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      serviceAccountName: litellm-sa
+      containers:
+        - name: litellm
+          image: asia-east1-docker.pkg.dev/project-1831e149-6b02-4652-ad2/litellm-demo/litellm-entra-oss:latest
+          imagePullPolicy: Always
+          args:
+            - "--config"
+            - "/app/config/config.yaml"
+            - "--port"
+            - "4000"
+          ports:
+            - containerPort: 4000
+              name: http
+          env:
+            - name: VERTEXAI_PROJECT
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: vertex-project
+            - name: VERTEXAI_LOCATION
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: vertex-location
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: database-url
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: litellm-master-key
+            - name: LITELLM_SALT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: litellm-salt-key
+            - name: ENTRA_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-tenant-id
+            - name: ENTRA_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-client-id
+            - name: ENTRA_ALLOWED_GROUP_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-allowed-group-ids
+            - name: ENTRA_ALLOWED_AUDIENCES
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-allowed-audiences
+            - name: ENTRA_ISSUER
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-issuer
+            - name: ENTRA_JWKS_URI
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-jwks-uri
+            - name: ENTRA_ALLOWED_MODELS
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-allowed-models
+            - name: ENTRA_USER_MAX_BUDGET
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-user-max-budget
+            - name: ENTRA_USER_BUDGET_DURATION
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-user-budget-duration
+            - name: VERTEX_TRACE_REQUESTS
+              value: "true"
+            - name: VERTEX_TRACE_INCLUDE_SECRETS
+              value: "false"
+          startupProbe:
+            tcpSocket:
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 18
+          readinessProbe:
+            tcpSocket:
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: 1
+              memory: 2Gi
+              ephemeral-storage: 2Gi
+          volumeMounts:
+            - name: litellm-config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: litellm-config
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: litellm-demo
+spec:
+  type: LoadBalancer
+  selector:
+    app: litellm
+  ports:
+    - name: http
+      port: 80
+      targetPort: 4000

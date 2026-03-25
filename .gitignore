@@ -1,0 +1,7 @@
+.demo.env
+.entra.env
+.secrets/
+.venv/
+__pycache__/
+*.pyc
+*.tmp
