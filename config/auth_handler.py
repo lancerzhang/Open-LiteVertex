@@ -20,6 +20,8 @@ DEFAULT_ALLOWED_MODELS = [
     "vertex-gemini-2.5-flash",
     "vertex-gemini-2.5-flash-lite",
     "vertex-gemini-2.5-pro",
+    "vertex-gemini-3-pro-preview",
+    "vertex-claude-sonnet-4-5",
 ]
 DEFAULT_PROXY_ADMIN_USER_ID = "litellm-proxy-admin"
 TRACE_LOG_PREFIX = "vertex-trace"
