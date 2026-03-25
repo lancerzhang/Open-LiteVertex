@@ -5,31 +5,36 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ClientId,
 
-    [switch]$UseDeviceCode
+    [switch]$UseDeviceCode,
+
+    [string]$Scope
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-    throw "Azure CLI (az) is not installed. Install it first, then rerun this script."
+function Get-PythonCommand {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $cmd) {
+        throw "python is not installed or not on PATH."
+    }
+    return $cmd.Source
 }
 
-$scope = "api://$ClientId/access_as_user"
-
-$loginArgs = @(
-    "login",
-    "--tenant", $TenantId,
-    "--scope", $scope
+$python = Get-PythonCommand
+$clientScript = Join-Path $PSScriptRoot "entra_client.py"
+$loginMode = if ($UseDeviceCode) { "device-code" } else { "interactive" }
+$commandArgs = @(
+    $clientScript,
+    "get-token",
+    "--tenant-id", $TenantId,
+    "--client-id", $ClientId,
+    "--login-mode", $loginMode
 )
 
-if ($UseDeviceCode) {
-    $loginArgs += "--use-device-code"
+if ($Scope) {
+    $commandArgs += @("--scope", $Scope)
 }
 
-& az @loginArgs | Out-Null
-az account get-access-token `
-    --tenant $TenantId `
-    --scope $scope `
-    --query "{accessToken:accessToken, expiresOn:expiresOn, tenant:tenant}" `
-    -o json
+& $python @commandArgs
+exit $LASTEXITCODE

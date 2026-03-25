@@ -1,26 +1,16 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent $PSScriptRoot
-$pidFilePath = Join-Path $root ".secrets\\entra-broker.pid"
-
-if (-not (Test-Path $pidFilePath)) {
-    Write-Host "No broker PID file found."
-    exit 0
+function Get-PythonCommand {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $cmd) {
+        throw "python is not installed or not on PATH."
+    }
+    return $cmd.Source
 }
 
-$brokerPid = Get-Content $pidFilePath | Select-Object -First 1
-if (-not $brokerPid) {
-    Write-Host "Broker PID file is empty."
-    exit 0
-}
+$python = Get-PythonCommand
+$clientScript = Join-Path $PSScriptRoot "entra_client.py"
 
-$process = Get-Process -Id $brokerPid -ErrorAction SilentlyContinue
-if ($process) {
-    Stop-Process -Id $brokerPid -Force
-    Write-Host "Stopped broker PID $brokerPid."
-} else {
-    Write-Host "Broker process $brokerPid is not running."
-}
-
-Remove-Item $pidFilePath -Force -ErrorAction SilentlyContinue
+& $python $clientScript "stop-broker"
+exit $LASTEXITCODE

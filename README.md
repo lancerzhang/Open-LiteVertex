@@ -28,16 +28,22 @@ What still needs your input:
 - `scripts/create-entra-team.ps1`: create a LiteLLM team whose `team_id` matches an Entra group ID.
 - `scripts/setup-entra-oss.ps1`: create a dedicated Entra API app + allowed security group for the OSS path.
 - `scripts/get-entra-token.ps1`: fetch a delegated access token for the API app via Azure CLI.
+- `scripts/get-entra-token.sh`: Linux wrapper for delegated Entra token acquisition via Azure CLI device code.
 - `scripts/decode-jwt.ps1`: inspect a JWT locally and confirm `aud`, `iss`, and `groups`.
 - `scripts/start-opencode-entra-direct.ps1`: launch `OpenCode` using a fresh Entra access token directly against LiteLLM.
+- `scripts/start-opencode-entra-direct.sh`: Linux wrapper for direct Entra token mode.
 - `scripts/start-entra-broker.ps1`: start a local auto-refresh broker on `127.0.0.1`.
+- `scripts/start-entra-broker.sh`: Linux wrapper for the local auto-refresh broker.
 - `scripts/start-opencode-entra-broker.ps1`: launch `OpenCode` against the local broker.
+- `scripts/start-opencode-entra-broker.sh`: Linux wrapper for broker mode.
 - `scripts/stop-entra-broker.ps1`: stop the local broker.
+- `scripts/stop-entra-broker.sh`: Linux wrapper to stop the local broker.
+- `scripts/entra_client.py`: shared cross-platform client entrypoint used by the Windows and Linux wrappers.
 - `scripts/entra_litellm_broker.py`: local FastAPI broker that refreshes Entra tokens with Azure CLI and forwards to LiteLLM.
 
 ## Quick Start
 
-From `D:\ws\vertex-dev`:
+From the repo root:
 
 ```powershell
 .\scripts\deploy-demo.ps1
@@ -89,12 +95,22 @@ $resp = .\scripts\get-entra-token.ps1 -TenantId "<tenant-id>" -ClientId "<client
 .\scripts\decode-jwt.ps1 -Token $resp.accessToken
 ```
 
+On Linux or a headless server, use device code login:
+
+```bash
+./scripts/get-entra-token.sh
+```
+
 ## OpenCode with Entra
 
 For a quick direct test, launch `OpenCode` with a fresh Entra access token:
 
 ```powershell
 .\scripts\start-opencode-entra-direct.ps1
+```
+
+```bash
+./scripts/start-opencode-entra-direct.sh
 ```
 
 This reuses the project `opencode.json` and injects:
@@ -109,8 +125,21 @@ For a smoother local dev loop, start the local broker once and point `OpenCode` 
 .\scripts\start-opencode-entra-broker.ps1
 ```
 
+```bash
+./scripts/start-entra-broker.sh
+./scripts/start-opencode-entra-broker.sh
+```
+
+Linux wrappers default to Azure CLI device code login and work on headless servers. Windows wrappers keep interactive login by default, and you can still force device code with `-UseDeviceCode`.
+
 The broker uses Azure CLI to refresh the Entra token before expiry and forwards requests to LiteLLM. To stop it:
 
 ```powershell
 .\scripts\stop-entra-broker.ps1
 ```
+
+```bash
+./scripts/stop-entra-broker.sh
+```
+
+If you need the broker to bind beyond localhost on Linux, pass `--host 0.0.0.0` to `scripts/start-entra-broker.sh` or `-Host 0.0.0.0` to `scripts/start-entra-broker.ps1`.

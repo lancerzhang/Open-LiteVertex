@@ -2,30 +2,34 @@
 param(
     [int]$Port = 8787,
     [string]$BrokerApiKey = "opencode-local-broker-key",
-    [switch]$UseDeviceCode
+    [string]$Host = "127.0.0.1",
+    [switch]$UseDeviceCode,
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Args
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent $PSScriptRoot
-
-& (Join-Path $PSScriptRoot "start-entra-broker.ps1") `
-    -Port $Port `
-    -BrokerApiKey $BrokerApiKey `
-    -UseDeviceCode:$UseDeviceCode
-
-$env:LITELLM_OPENAI_BASE_URL = "http://127.0.0.1:$Port/v1"
-$env:LITELLM_API_KEY = $BrokerApiKey
-
-$cmd = Get-Command opencode -ErrorAction SilentlyContinue
-if ($null -eq $cmd) {
-    throw "opencode is not installed. Install it first, for example: npm install -g opencode-ai"
+function Get-PythonCommand {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $cmd) {
+        throw "python is not installed or not on PATH."
+    }
+    return $cmd.Source
 }
 
-Push-Location $root
-try {
-    & $cmd.Source @args
-} finally {
-    Pop-Location
-}
+$python = Get-PythonCommand
+$clientScript = Join-Path $PSScriptRoot "entra_client.py"
+$loginMode = if ($UseDeviceCode) { "device-code" } else { "interactive" }
+
+& $python $clientScript `
+    "run-opencode-broker" `
+    "--port" $Port `
+    "--host" $Host `
+    "--broker-api-key" $BrokerApiKey `
+    "--login-mode" $loginMode `
+    "--" @Args
+
+exit $LASTEXITCODE

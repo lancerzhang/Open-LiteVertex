@@ -117,7 +117,8 @@ class EntraTokenCache:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=(
                     "Unable to refresh Entra access token via Azure CLI. "
-                    "Run scripts/get-entra-token.ps1 once to complete interactive login. "
+                    "Run scripts/get-entra-token.ps1 on Windows, scripts/get-entra-token.sh on Linux, "
+                    "or python scripts/entra_client.py get-token once to complete login. "
                     f"Azure CLI said: {stderr}"
                 ),
             )
