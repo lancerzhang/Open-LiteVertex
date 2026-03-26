@@ -44,8 +44,8 @@ function Test-LiteLLMAuth {
 }
 
 function Invoke-LiteLLMLogin {
-    Write-Host "No saved LiteLLM provider login found. Starting Entra device-code login..." -ForegroundColor Yellow
-    & $cmd.Source "providers" "login" "--provider" "litellm"
+    Write-Host "No saved Entra LiteVertex login found. Opening OpenCode provider login..." -ForegroundColor Yellow
+    & $cmd.Source "auth" "login"
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

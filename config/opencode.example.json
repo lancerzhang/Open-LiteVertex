@@ -3,7 +3,7 @@
   "provider": {
     "litellm": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "LiteLLM Vertex Demo",
+      "name": "Entra LiteVertex",
       "options": {
         "baseURL": "http://REPLACE_WITH_LITELLM_ENDPOINT/v1",
         "apiKey": "{env:LITELLM_API_KEY}"

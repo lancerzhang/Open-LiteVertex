@@ -6,7 +6,7 @@
   "provider": {
     "litellm": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "LiteLLM Vertex Demo",
+      "name": "Entra LiteVertex",
       "options": {
         "baseURL": "{env:LITELLM_OPENAI_BASE_URL}",
         "apiKey": "{env:LITELLM_API_KEY}"

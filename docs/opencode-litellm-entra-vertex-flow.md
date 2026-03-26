@@ -139,14 +139,14 @@
 
 ### 6.1 用户首次登录
 
-1. 用户运行 `opencode providers login --provider litellm`
+1. 用户运行 `opencode auth login`，或者在 TUI 的 `/connect` 里选择 `Entra LiteVertex`
 2. 全局 plugin 读取当前项目的 `.entra.env` 或同名环境变量
-3. 如果本地已有 refresh token，就直接静默刷新
-4. 如果没有，就在终端显示 Microsoft Entra 返回的验证链接和 user code
+3. OpenCode 登录对话框显示 provider 名称 `Entra LiteVertex`
+4. plugin 通过 OpenCode 的 `oauth/auto` 视图返回 Microsoft Entra 的验证链接和 user code
 5. 用户在任意有浏览器的设备上完成验证
 6. Entra 返回 Access Token 和 Refresh Token
 7. plugin 把 Refresh Token 安全地缓存在 `~/.config/opencode/entra-device-token.json`
-8. 登录状态会写入 OpenCode 自己的 auth store
+8. 登录状态会以 `oauth` 形式写入 OpenCode 自己的 auth store
 
 ### 6.2 用户第一次发起模型请求
 
@@ -224,7 +224,7 @@ Linux:
 ./scripts/start-opencode-entra-plugin.sh
 ```
 
-第一次运行时，这个脚本会先自动执行 `opencode providers login --provider litellm`，完成 device code 登录，然后再进入 OpenCode。
+第一次运行时，这个脚本会先自动执行 `opencode auth login`。在 OpenCode 的 provider 列表里会显示 `Entra LiteVertex`，用户选中后会直接看到 Microsoft 的 device code 链接和验证码，然后再进入 OpenCode。
 
 如果只想单独刷新登录态，可以用：
 

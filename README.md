@@ -151,7 +151,9 @@ In plugin mode:
 - the plugin injects `Authorization: Bearer <entra_access_token>` on outbound `litellm` requests
 - token refresh uses the same native device-code cache in `~/.config/opencode/entra-device-token.json`
 - the plugin is global, so other projects can reuse it as long as they provide `ENTRA_*` config and a `litellm` provider
-- on the first run, the start script auto-triggers `opencode providers login --provider litellm`
+- the provider shows up in `/connect` and `opencode auth login` as `Entra LiteVertex`
+- login uses OpenCode's built-in OAuth auto view, so the UI shows the Microsoft verification link and device code directly
+- on the first run, the start script opens `opencode auth login`, where `Entra LiteVertex` appears as a selectable provider
 
 If you only want to refresh the provider login without starting the TUI:
 

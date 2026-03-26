@@ -6,7 +6,7 @@
   "provider": {
     "litellm": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "LiteLLM Vertex Entra Direct",
+      "name": "Entra LiteVertex Direct",
       "options": {
         "baseURL": "{env:LITELLM_OPENAI_BASE_URL}",
         "apiKey": "{env:ENTRA_ACCESS_TOKEN}"

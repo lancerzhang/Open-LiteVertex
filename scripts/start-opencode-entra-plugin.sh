@@ -67,8 +67,8 @@ PY
 }
 
 run_litellm_login() {
-  echo "No saved LiteLLM provider login found. Starting Entra device-code login..." >&2
-  opencode providers login --provider litellm
+  echo "No saved Entra LiteVertex login found. Opening OpenCode provider login..." >&2
+  opencode auth login
 }
 
 if [[ ! -f "$DEMO_ENV_FILE" ]]; then

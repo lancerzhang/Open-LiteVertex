@@ -3,7 +3,6 @@ import os from "node:os"
 import path from "node:path"
 
 const PROVIDER_ID = "litellm"
-const DEVICE_CODE_KEY = "device-code"
 const DUMMY_API_KEY = "opencode-entra-plugin-placeholder"
 const TOKEN_REFRESH_SKEW_SECONDS = 300
 const DEFAULT_TOKEN_CACHE_PATH = path.join(os.homedir(), ".config", "opencode", "entra-device-token.json")
@@ -27,6 +26,13 @@ type TokenCacheRecord = TokenPayload & {
   publicClientId: string
   scope: string
   refreshToken?: string
+}
+
+type StoredOAuthAuth = {
+  type: "oauth"
+  refresh?: string
+  access?: string
+  expires?: number
 }
 
 class InteractionRequiredError extends Error {}
@@ -181,25 +187,6 @@ async function requestDeviceCode(settings: EntraSettings): Promise<any> {
   return payload
 }
 
-function printDeviceCodePrompt(payload: any): void {
-  const message = String(payload?.message ?? "").trim()
-  const verificationUri = String(payload?.verification_uri ?? "").trim()
-  const userCode = String(payload?.user_code ?? "").trim()
-  const verificationUriComplete = String(payload?.verification_uri_complete ?? "").trim()
-
-  if (message) {
-    console.error(message)
-  } else {
-    console.error("Microsoft Entra device-code login is required.")
-    console.error(`Open: ${verificationUri}`)
-    console.error(`Code: ${userCode}`)
-  }
-
-  if (verificationUriComplete) {
-    console.error(`Direct URL: ${verificationUriComplete}`)
-  }
-}
-
 async function pollForDeviceCodeToken(settings: EntraSettings, deviceCodePayload: any): Promise<any> {
   const url = `https://login.microsoftonline.com/${settings.tenantId}/oauth2/v2.0/token`
   const deviceCode = String(deviceCodePayload?.device_code ?? "").trim()
@@ -275,8 +262,56 @@ function buildTokenPayload(payload: any): TokenPayload {
   }
 }
 
-async function acquireAccessToken(settings: EntraSettings, allowInteraction: boolean): Promise<TokenPayload> {
-  const cacheRecord = readTokenCache(settings)
+function buildTokenCacheRecord(
+  settings: EntraSettings,
+  token: TokenPayload,
+  refreshTokenValue?: string,
+): TokenCacheRecord {
+  return {
+    tenantId: settings.tenantId,
+    clientId: settings.clientId,
+    publicClientId: settings.publicClientId,
+    scope: normalizeScope(settings.scope),
+    accessToken: token.accessToken,
+    expiresOnEpoch: token.expiresOnEpoch,
+    refreshToken: refreshTokenValue,
+  }
+}
+
+function getRefreshToken(payload: any, fallback?: string): string | undefined {
+  return String(payload?.refresh_token ?? fallback ?? "")
+    .trim() || undefined
+}
+
+function tokenCacheFromAuth(settings: EntraSettings, auth: unknown): TokenCacheRecord | undefined {
+  if (!auth || typeof auth !== "object" || (auth as StoredOAuthAuth).type !== "oauth") {
+    return undefined
+  }
+
+  const accessToken = String((auth as StoredOAuthAuth).access ?? "").trim()
+  if (!accessToken) return undefined
+
+  const expiresMs = Number((auth as StoredOAuthAuth).expires ?? 0)
+  const expiresOnEpoch =
+    Number.isFinite(expiresMs) && expiresMs > 0 ? Math.floor(expiresMs / 1000) : undefined
+
+  return buildTokenCacheRecord(settings, { accessToken, expiresOnEpoch }, String((auth as StoredOAuthAuth).refresh ?? "").trim() || undefined)
+}
+
+async function acquireAccessToken(settings: EntraSettings, allowInteraction: boolean, auth?: unknown): Promise<TokenPayload> {
+  let cacheRecord = readTokenCache(settings)
+  const authRecord = tokenCacheFromAuth(settings, auth)
+  if (
+    authRecord &&
+    (!cacheRecord ||
+      !cacheRecord.refreshToken ||
+      (Number(authRecord.expiresOnEpoch ?? 0) > Number(cacheRecord.expiresOnEpoch ?? 0) &&
+        authRecord.accessToken !== cacheRecord.accessToken))
+  ) {
+    cacheRecord = authRecord
+    writeTokenCache(settings, authRecord)
+  }
+
   if (isFreshToken(cacheRecord)) {
     return {
       accessToken: cacheRecord!.accessToken,
@@ -288,15 +323,7 @@ async function acquireAccessToken(settings: EntraSettings, allowInteraction: boo
     try {
       const refreshed = await refreshToken(settings, cacheRecord.refreshToken)
       const token = buildTokenPayload(refreshed)
-      writeTokenCache(settings, {
-        tenantId: settings.tenantId,
-        clientId: settings.clientId,
-        publicClientId: settings.publicClientId,
-        scope: normalizeScope(settings.scope),
-        accessToken: token.accessToken,
-        expiresOnEpoch: token.expiresOnEpoch,
-        refreshToken: String(refreshed?.refresh_token ?? cacheRecord.refreshToken).trim() || cacheRecord.refreshToken,
-      })
+      writeTokenCache(settings, buildTokenCacheRecord(settings, token, getRefreshToken(refreshed, cacheRecord.refreshToken)))
       return token
     } catch (error) {
       if (!(error instanceof InteractionRequiredError)) {
@@ -306,23 +333,22 @@ async function acquireAccessToken(settings: EntraSettings, allowInteraction: boo
   }
 
   if (!allowInteraction) {
-    throw new Error("No reusable Entra device-code token is available. Run `opencode providers login --provider litellm` first.")
+    throw new Error("No reusable Entra device-code token is available. Run `opencode auth login --provider litellm` first.")
   }
 
-  const deviceCodePayload = await requestDeviceCode(settings)
-  printDeviceCodePrompt(deviceCodePayload)
+  throw new InteractionRequiredError("Microsoft Entra requires interactive device-code login.")
+}
+
+async function completeDeviceCodeLogin(settings: EntraSettings, deviceCodePayload: any) {
   const tokenResponse = await pollForDeviceCodeToken(settings, deviceCodePayload)
   const token = buildTokenPayload(tokenResponse)
-  writeTokenCache(settings, {
-    tenantId: settings.tenantId,
-    clientId: settings.clientId,
-    publicClientId: settings.publicClientId,
-    scope: normalizeScope(settings.scope),
-    accessToken: token.accessToken,
-    expiresOnEpoch: token.expiresOnEpoch,
-    refreshToken: String(tokenResponse?.refresh_token ?? "").trim() || undefined,
-  })
-  return token
+  const refreshToken = getRefreshToken(tokenResponse)
+  writeTokenCache(settings, buildTokenCacheRecord(settings, token, refreshToken))
+
+  return {
+    token,
+    refreshToken,
+  }
 }
 
 export const EntraLiteLLMAuthPlugin = async (input: any) => {
@@ -331,7 +357,7 @@ export const EntraLiteLLMAuthPlugin = async (input: any) => {
   let cachedTokenKey = ""
   let pendingToken: Promise<TokenPayload> | undefined
 
-  const getToken = async (settings: EntraSettings, allowInteraction: boolean): Promise<TokenPayload> => {
+  const getToken = async (settings: EntraSettings, allowInteraction: boolean, auth?: unknown): Promise<TokenPayload> => {
     const settingsKey = JSON.stringify(settings)
     if (!allowInteraction && cachedTokenKey === settingsKey && isFreshToken(cachedToken)) {
       return cachedToken!
@@ -341,7 +367,7 @@ export const EntraLiteLLMAuthPlugin = async (input: any) => {
     }
 
     pendingToken = Promise.resolve()
-      .then(() => acquireAccessToken(settings, allowInteraction))
+      .then(() => acquireAccessToken(settings, allowInteraction, auth))
       .then((token) => {
         cachedToken = token
         cachedTokenKey = settingsKey
@@ -371,7 +397,7 @@ export const EntraLiteLLMAuthPlugin = async (input: any) => {
               return fetch(requestInput, init)
             }
 
-            const token = await getToken(settings, false).catch((error) => {
+            const token = await getToken(settings, false, auth).catch((error) => {
               throw new Error(
                 `Unable to refresh the Entra token for LiteLLM. ${error instanceof Error ? error.message : String(error)}`,
               )
@@ -390,8 +416,8 @@ export const EntraLiteLLMAuthPlugin = async (input: any) => {
       },
       methods: [
         {
-          type: "api" as const,
-          label: "Device Code",
+          type: "oauth" as const,
+          label: "Microsoft Entra Device Code",
           async authorize() {
             const settings = resolveEntraSettings(root)
             if (!settings) {
@@ -400,10 +426,25 @@ export const EntraLiteLLMAuthPlugin = async (input: any) => {
               )
             }
 
-            await getToken(settings, true)
+            const deviceCodePayload = await requestDeviceCode(settings)
+            const verificationUrl =
+              String(deviceCodePayload?.verification_uri_complete ?? "").trim() ||
+              String(deviceCodePayload?.verification_uri ?? "").trim()
+            const userCode = String(deviceCodePayload?.user_code ?? "").trim()
+
             return {
-              type: "success" as const,
-              key: DEVICE_CODE_KEY,
+              url: verificationUrl,
+              instructions: `Enter code: ${userCode}`,
+              method: "auto" as const,
+              callback: async () => {
+                const { token, refreshToken } = await completeDeviceCodeLogin(settings, deviceCodePayload)
+                return {
+                  type: "success" as const,
+                  refresh: refreshToken || token.accessToken,
+                  access: token.accessToken,
+                  expires: Number(token.expiresOnEpoch ?? 0) > 0 ? Number(token.expiresOnEpoch) * 1000 : Date.now(),
+                }
+              },
             }
           },
         },
