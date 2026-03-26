@@ -20,11 +20,11 @@
 
 `OpenCode(direct bearer token) -> LiteLLM OSS(custom_auth) -> Vertex AI`
 
-这里没有单独的 broker，也没有额外的认证网关。
+这里由 OpenCode global plugin 直接完成客户端登录和请求鉴权，不额外引入认证网关。
 
-## 3. 为什么不再保留本地 Broker
+## 3. 客户端登录与鉴权路径
 
-因为客户端真正需要的事情只有两件：
+客户端真正需要的事情只有两件：
 
 - 通过 Entra device code flow 获取用户 access token
 - 在请求发往 LiteLLM 前补上 `Authorization: Bearer <entra_access_token>`

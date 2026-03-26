@@ -7,8 +7,6 @@ Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Aut
 - `OpenCode(global plugin auth) -> LiteLLM OSS(custom_auth) -> Vertex AI`
 - `OpenCode(direct bearer token) -> LiteLLM OSS(custom_auth) -> Vertex AI`
 
-本仓库不再保留本地 broker，也不再保留 Azure CLI 的客户端登录分支。
-
 ## What It Does
 
 - Creates or reuses a `GKE Autopilot` cluster.
