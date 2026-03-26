@@ -278,12 +278,18 @@ def _get_jwks_client(jwks_uri: str) -> PyJWKClient:
 def _get_entra_settings() -> Dict[str, Any]:
     tenant_id = _first_env("ENTRA_TENANT_ID")
     client_id = _first_env("ENTRA_CLIENT_ID")
+    public_client_id = _first_env("ENTRA_PUBLIC_CLIENT_ID")
     allowed_group_ids = _split_csv(
         _first_env("ENTRA_ALLOWED_GROUP_IDS", "ENTRA_ALLOWED_GROUP_ID")
     )
     allowed_audiences = _split_csv(_first_env("ENTRA_ALLOWED_AUDIENCES"))
-    if not allowed_audiences and client_id:
-        allowed_audiences = [client_id, f"api://{client_id}"]
+    if not allowed_audiences:
+        derived_audiences: List[str] = []
+        if public_client_id:
+            derived_audiences.append(public_client_id)
+        if client_id:
+            derived_audiences.extend([client_id, f"api://{client_id}"])
+        allowed_audiences = list(dict.fromkeys(derived_audiences))
     issuer = _first_env("ENTRA_ISSUER")
     if issuer is None and tenant_id is not None:
         issuer = f"https://login.microsoftonline.com/{tenant_id}/v2.0"
@@ -294,6 +300,7 @@ def _get_entra_settings() -> Dict[str, Any]:
     return {
         "tenant_id": tenant_id,
         "client_id": client_id,
+        "public_client_id": public_client_id,
         "allowed_group_ids": allowed_group_ids,
         "allowed_audiences": allowed_audiences,
         "issuer": issuer,
@@ -309,7 +316,9 @@ def _require_entra_settings() -> Dict[str, Any]:
     if not settings["allowed_group_ids"]:
         missing.append("ENTRA_ALLOWED_GROUP_IDS")
     if not settings["allowed_audiences"]:
-        missing.append("ENTRA_CLIENT_ID or ENTRA_ALLOWED_AUDIENCES")
+        missing.append(
+            "ENTRA_CLIENT_ID or ENTRA_PUBLIC_CLIENT_ID or ENTRA_ALLOWED_AUDIENCES"
+        )
     if not settings["issuer"]:
         missing.append("ENTRA_ISSUER")
     if not settings["jwks_uri"]:
@@ -697,7 +706,7 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
     if not _is_jwt(token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unsupported credential. Use a LiteLLM key or an Entra access token.",
+            detail="Unsupported credential. Use a LiteLLM key or an Entra JWT.",
         )
 
     claims = _decode_entra_token(token)

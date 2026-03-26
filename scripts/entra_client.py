@@ -134,11 +134,16 @@ def _run_opencode_direct(args: argparse.Namespace) -> int:
         public_client_id=public_client_id,
         token_cache_path=args.token_cache_path,
     )
+    bearer_token = str(token.get("bearerToken") or token.get("idToken") or token.get("accessToken") or "")
+    if not bearer_token:
+        raise CliError("Entra login completed, but no bearer token is available for LiteLLM.")
 
     opencode_env = _merge_env(entra_env, demo_env)
-    opencode_env["ENTRA_ACCESS_TOKEN"] = str(token["accessToken"])
+    opencode_env["ENTRA_ACCESS_TOKEN"] = str(token.get("accessToken", ""))
+    opencode_env["ENTRA_ID_TOKEN"] = str(token.get("idToken", ""))
+    opencode_env["ENTRA_BEARER_TOKEN"] = bearer_token
     opencode_env["ENTRA_ACCESS_TOKEN_EXPIRES_ON"] = str(token.get("expiresOn", ""))
-    opencode_env["LITELLM_API_KEY"] = str(token["accessToken"])
+    opencode_env["LITELLM_API_KEY"] = bearer_token
     opencode_env["LITELLM_OPENAI_BASE_URL"] = demo_env["LITELLM_BASE_URL"].strip().rstrip("/") + "/v1"
     opencode_env["ENTRA_OPENCODE_PLUGIN_DISABLED"] = "1"
 

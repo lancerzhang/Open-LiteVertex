@@ -281,6 +281,7 @@ if (-not $publicClientApp) {
 
 $publicClientPatchBody = @{
     isFallbackPublicClient = $true
+    groupMembershipClaims = "SecurityGroup"
     requiredResourceAccess = @(
         @{
             resourceAppId = $app.appId

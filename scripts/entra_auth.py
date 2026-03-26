@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -30,6 +31,8 @@ class EntraInteractionRequired(EntraAuthError):
 @dataclass
 class AccessTokenResult:
     access_token: str
+    id_token: str
+    bearer_token: str
     expires_on: str
     expires_on_epoch: int | None
     tenant: str
@@ -41,6 +44,8 @@ class AccessTokenResult:
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "accessToken": self.access_token,
+            "idToken": self.id_token,
+            "bearerToken": self.bearer_token,
             "expiresOn": self.expires_on,
             "expiresOnEpoch": self.expires_on_epoch,
             "tenant": self.tenant,
@@ -99,7 +104,12 @@ def _acquire_access_token_device_code(
         scope=requested_scope,
     )
 
-    if cache_record and _token_is_fresh(_coerce_int(cache_record.get("expiresOnEpoch")), refresh_skew_seconds):
+    cached_id_token = str(cache_record.get("idToken", "")).strip() if cache_record else ""
+    cached_refresh_token = str(cache_record.get("refreshToken", "")).strip() if cache_record else ""
+    can_reuse_cached_token = bool(cached_id_token) or not cached_refresh_token
+    if cache_record and can_reuse_cached_token and _token_is_fresh(
+        _coerce_int(cache_record.get("expiresOnEpoch")), refresh_skew_seconds
+    ):
         return _token_result_from_cache(
             cache_record,
             tenant_id=tenant_id,
@@ -171,6 +181,10 @@ def _acquire_access_token_device_code(
 
 def _normalize_device_code_scope(scope: str) -> str:
     scopes = [part.strip() for part in scope.split() if part.strip()]
+    if "openid" not in scopes:
+        scopes.append("openid")
+    if "profile" not in scopes:
+        scopes.append("profile")
     if "offline_access" not in scopes:
         scopes.append("offline_access")
     return " ".join(scopes)
@@ -268,17 +282,28 @@ def _build_device_code_result(
     previous_refresh_token: str | None = None,
 ) -> tuple[AccessTokenResult, dict[str, Any]]:
     access_token = str(payload.get("access_token", "")).strip()
-    if not access_token:
-        raise EntraAuthError("Microsoft Entra did not return an access token.")
+    id_token = str(payload.get("id_token", "")).strip()
+    bearer_token = id_token or str(payload.get("bearerToken", "")).strip() or access_token
+    if not id_token:
+        raise EntraAuthError(
+            "Microsoft Entra did not return an ID token. Ensure the login request includes the openid scope."
+        )
+    if not bearer_token:
+        raise EntraAuthError("Microsoft Entra did not return a usable bearer token.")
 
     expires_in = _coerce_int(payload.get("expires_in"))
-    if expires_in is None:
-        raise EntraAuthError("Microsoft Entra did not return expires_in for the access token.")
-
-    expires_on_epoch = int(time.time()) + max(expires_in, 0)
+    expires_on_epoch = (
+        _get_jwt_exp_epoch(bearer_token)
+        or _get_jwt_exp_epoch(id_token)
+        or (int(time.time()) + max(expires_in, 0) if expires_in is not None else None)
+    )
+    if expires_on_epoch is None:
+        raise EntraAuthError("Microsoft Entra did not return a usable expiry for the ID token.")
     refresh_token = str(payload.get("refresh_token") or previous_refresh_token or "").strip()
     result = AccessTokenResult(
         access_token=access_token,
+        id_token=id_token,
+        bearer_token=bearer_token,
         expires_on=_format_epoch(expires_on_epoch),
         expires_on_epoch=expires_on_epoch,
         tenant=tenant_id,
@@ -292,7 +317,9 @@ def _build_device_code_result(
         "clientId": client_id,
         "publicClientId": public_client_id,
         "scope": requested_scope,
+        "bearerToken": bearer_token,
         "accessToken": access_token,
+        "idToken": id_token,
         "expiresOn": result.expires_on,
         "expiresOnEpoch": expires_on_epoch,
         "refreshToken": refresh_token,
@@ -308,17 +335,27 @@ def _token_result_from_cache(
     scope: str,
     public_client_id: str,
 ) -> AccessTokenResult:
+    bearer_token = (
+        str(payload.get("bearerToken", "")).strip()
+        or str(payload.get("idToken", "")).strip()
+        or str(payload.get("accessToken", "")).strip()
+    )
+    if not bearer_token:
+        raise EntraAuthError("Cached Entra device-code token is missing bearerToken.")
     access_token = str(payload.get("accessToken", "")).strip()
-    if not access_token:
-        raise EntraAuthError("Cached Entra device-code token is missing accessToken.")
+    id_token = str(payload.get("idToken", "")).strip() or bearer_token
 
     expires_on_epoch = _coerce_int(payload.get("expiresOnEpoch"))
+    if expires_on_epoch is None:
+        expires_on_epoch = _get_jwt_exp_epoch(bearer_token)
     expires_on = str(payload.get("expiresOn", "")).strip()
     if not expires_on and expires_on_epoch is not None:
         expires_on = _format_epoch(expires_on_epoch)
 
     return AccessTokenResult(
         access_token=access_token,
+        id_token=id_token,
+        bearer_token=bearer_token,
         expires_on=expires_on,
         expires_on_epoch=expires_on_epoch,
         tenant=tenant_id,
@@ -446,6 +483,25 @@ def _format_epoch(epoch: int | None) -> str:
     if epoch is None:
         return ""
     return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch))
+
+
+def _get_jwt_exp_epoch(token: str) -> int | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
+        claims = json.loads(decoded)
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+    exp = _coerce_int(claims.get("exp")) if isinstance(claims, dict) else None
+    if exp is None or exp <= 0:
+        return None
+    return exp
 
 
 def _coerce_int(value: Any) -> int | None:

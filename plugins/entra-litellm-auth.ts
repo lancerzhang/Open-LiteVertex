@@ -17,7 +17,9 @@ type EntraSettings = {
 }
 
 type TokenPayload = {
-  accessToken: string
+  bearerToken: string
+  accessToken?: string
+  idToken?: string
   expiresOnEpoch?: number
 }
 
@@ -45,7 +47,7 @@ const PROVIDER_SETTINGS: Record<string, EntraSettings> = {
     tenantId: "2647159d-89f7-4c5e-aa37-c3218de7b638",
     clientId: "f5f8f478-9688-4984-a83e-2136b3871838",
     publicClientId: "ab845a82-90aa-4fff-967f-77a6f9766687",
-    scope: "api://f5f8f478-9688-4984-a83e-2136b3871838/access_as_user offline_access",
+    scope: "openid profile api://f5f8f478-9688-4984-a83e-2136b3871838/access_as_user offline_access",
     baseURL: "http://35.229.226.109/v1",
     tokenCachePath: path.join(os.homedir(), ".config", "opencode", "entra-device-token.json"),
   },
@@ -55,7 +57,7 @@ const PROVIDER_SETTINGS: Record<string, EntraSettings> = {
     tenantId: "2647159d-89f7-4c5e-aa37-c3218de7b638",
     clientId: "f5f8f478-9688-4984-a83e-2136b3871838",
     publicClientId: "ab845a82-90aa-4fff-967f-77a6f9766687",
-    scope: "api://f5f8f478-9688-4984-a83e-2136b3871838/access_as_user offline_access",
+    scope: "openid profile api://f5f8f478-9688-4984-a83e-2136b3871838/access_as_user offline_access",
     baseURL: "http://35.229.226.109/v1",
     tokenCachePath: path.join(os.homedir(), ".config", "opencode", "entra-device-token.dev.json"),
   },
@@ -63,8 +65,34 @@ const PROVIDER_SETTINGS: Record<string, EntraSettings> = {
 
 function normalizeScope(scope: string): string {
   const scopes = scope.split(/\s+/).map((part) => part.trim()).filter(Boolean)
+  if (!scopes.includes("openid")) scopes.push("openid")
+  if (!scopes.includes("profile")) scopes.push("profile")
   if (!scopes.includes("offline_access")) scopes.push("offline_access")
   return scopes.join(" ")
+}
+
+function decodeJwtPayload(token: string | undefined): any {
+  if (!token) return undefined
+  const parts = token.split(".")
+  if (parts.length !== 3) return undefined
+
+  try {
+    const normalized = parts[1].replace(/-/g, "+").replace(/_/g, "/")
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4)
+    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"))
+  } catch {
+    return undefined
+  }
+}
+
+function getJwtExpiryEpoch(token: string | undefined): number | undefined {
+  const exp = Number(decodeJwtPayload(token)?.exp ?? 0)
+  return Number.isFinite(exp) && exp > 0 ? exp : undefined
+}
+
+function isLikelyIdToken(settings: EntraSettings, token: string | undefined): boolean {
+  const aud = String(decodeJwtPayload(token)?.aud ?? "").trim()
+  return aud === settings.publicClientId
 }
 
 function isPluginDisabled(): boolean {
@@ -86,17 +114,24 @@ function readTokenCache(settings: EntraSettings): TokenCacheRecord | undefined {
       return undefined
     }
 
-    const accessToken = String(payload.accessToken ?? "").trim()
-    if (!accessToken) return undefined
+    const accessToken = String(payload.accessToken ?? "").trim() || undefined
+    const idToken = String(payload.idToken ?? "").trim() || undefined
+    const bearerToken = String(payload.bearerToken ?? "").trim() || idToken || accessToken
+    if (!bearerToken) return undefined
+    const refreshToken = String(payload.refreshToken ?? "").trim() || undefined
+    const expiresOnEpoch =
+      Number(payload.expiresOnEpoch ?? 0) || getJwtExpiryEpoch(bearerToken) || getJwtExpiryEpoch(idToken) || undefined
 
     return {
       tenantId: settings.tenantId,
       clientId: settings.clientId,
       publicClientId: settings.publicClientId,
       scope: normalizeScope(settings.scope),
+      bearerToken,
       accessToken,
-      expiresOnEpoch: Number(payload.expiresOnEpoch ?? 0) || undefined,
-      refreshToken: String(payload.refreshToken ?? "").trim() || undefined,
+      idToken,
+      expiresOnEpoch: idToken ? expiresOnEpoch : refreshToken ? undefined : expiresOnEpoch,
+      refreshToken,
     }
   } catch {
     return undefined
@@ -223,17 +258,24 @@ async function refreshToken(settings: EntraSettings, refreshTokenValue: string):
 }
 
 function buildTokenPayload(payload: any): TokenPayload {
-  const accessToken = String(payload?.access_token ?? payload?.accessToken ?? "").trim()
-  if (!accessToken) {
-    throw new Error("Microsoft Entra did not return an access token.")
+  const accessToken = String(payload?.access_token ?? payload?.accessToken ?? "").trim() || undefined
+  const idToken = String(payload?.id_token ?? payload?.idToken ?? "").trim() || undefined
+  const bearerToken = String(payload?.bearerToken ?? "").trim() || idToken || accessToken
+  if (!idToken) {
+    throw new Error("Microsoft Entra did not return an ID token. Ensure the login request includes the openid scope.")
+  }
+  if (!bearerToken) {
+    throw new Error("Microsoft Entra did not return a usable bearer token.")
   }
 
-  const expiresOnEpoch =
-    Number(payload?.expiresOnEpoch ?? 0) ||
+  const expiresOnEpoch = Number(payload?.expiresOnEpoch ?? 0) || getJwtExpiryEpoch(bearerToken) ||
+    getJwtExpiryEpoch(idToken) ||
     (Number(payload?.expires_in ?? 0) > 0 ? Math.floor(Date.now() / 1000) + Number(payload.expires_in) : undefined)
 
   return {
+    bearerToken,
     accessToken,
+    idToken,
     expiresOnEpoch: Number.isFinite(Number(expiresOnEpoch)) && Number(expiresOnEpoch) > 0 ? Number(expiresOnEpoch) : undefined,
   }
 }
@@ -248,7 +290,9 @@ function buildTokenCacheRecord(
     clientId: settings.clientId,
     publicClientId: settings.publicClientId,
     scope: normalizeScope(settings.scope),
+    bearerToken: token.bearerToken,
     accessToken: token.accessToken,
+    idToken: token.idToken,
     expiresOnEpoch: token.expiresOnEpoch,
     refreshToken: refreshTokenValue,
   }
@@ -263,16 +307,24 @@ function tokenCacheFromAuth(settings: EntraSettings, auth: unknown): TokenCacheR
     return undefined
   }
 
-  const accessToken = String((auth as StoredOAuthAuth).access ?? "").trim()
-  if (!accessToken) return undefined
+  const bearerToken = String((auth as StoredOAuthAuth).access ?? "").trim()
+  if (!bearerToken) return undefined
 
   const expiresMs = Number((auth as StoredOAuthAuth).expires ?? 0)
-  const expiresOnEpoch = Number.isFinite(expiresMs) && expiresMs > 0 ? Math.floor(expiresMs / 1000) : undefined
+  const expiresOnEpoch =
+    (Number.isFinite(expiresMs) && expiresMs > 0 ? Math.floor(expiresMs / 1000) : undefined) || getJwtExpiryEpoch(bearerToken)
+  const refreshToken = String((auth as StoredOAuthAuth).refresh ?? "").trim() || undefined
+  const idToken = isLikelyIdToken(settings, bearerToken) ? bearerToken : undefined
 
   return buildTokenCacheRecord(
     settings,
-    { accessToken, expiresOnEpoch },
-    String((auth as StoredOAuthAuth).refresh ?? "").trim() || undefined,
+    {
+      bearerToken,
+      accessToken: idToken ? undefined : bearerToken,
+      idToken,
+      expiresOnEpoch: idToken ? expiresOnEpoch : refreshToken ? undefined : expiresOnEpoch,
+    },
+    refreshToken,
   )
 }
 
@@ -284,7 +336,7 @@ async function acquireAccessToken(settings: EntraSettings, allowInteraction: boo
     (!cacheRecord ||
       !cacheRecord.refreshToken ||
       (Number(authRecord.expiresOnEpoch ?? 0) > Number(cacheRecord.expiresOnEpoch ?? 0) &&
-        authRecord.accessToken !== cacheRecord.accessToken))
+        authRecord.bearerToken !== cacheRecord.bearerToken))
   ) {
     cacheRecord = authRecord
     writeTokenCache(settings, authRecord)
@@ -292,7 +344,9 @@ async function acquireAccessToken(settings: EntraSettings, allowInteraction: boo
 
   if (isFreshToken(cacheRecord)) {
     return {
+      bearerToken: cacheRecord!.bearerToken,
       accessToken: cacheRecord!.accessToken,
+      idToken: cacheRecord!.idToken,
       expiresOnEpoch: cacheRecord!.expiresOnEpoch,
     }
   }
@@ -382,7 +436,7 @@ function createEntraAuthPlugin(settings: EntraSettings) {
               request.headers.delete("Authorization")
               request.headers.delete("x-api-key")
               request.headers.delete("X-API-Key")
-              request.headers.set("Authorization", `Bearer ${token.accessToken}`)
+              request.headers.set("Authorization", `Bearer ${token.bearerToken}`)
 
               return fetch(request)
             },
@@ -407,8 +461,8 @@ function createEntraAuthPlugin(settings: EntraSettings) {
                   const { token, refreshToken } = await completeDeviceCodeLogin(settings, deviceCodePayload)
                   return {
                     type: "success" as const,
-                    refresh: refreshToken || token.accessToken,
-                    access: token.accessToken,
+                    refresh: refreshToken || token.bearerToken,
+                    access: token.bearerToken,
                     expires: Number(token.expiresOnEpoch ?? 0) > 0 ? Number(token.expiresOnEpoch) * 1000 : Date.now(),
                   }
                 },
