@@ -219,49 +219,21 @@ Linux:
 - 安装或刷新全局 `opencode.json`
 - 如果有旧 token cache，则迁移到全局目录
 
-### 8.2 做一次首次登录初始化
-
-Windows:
-
-```powershell
-.\scripts\bootstrap-opencode-entra.ps1
-```
-
-Linux:
-
-```bash
-./scripts/bootstrap-opencode-entra.sh
-```
-
-这个 bootstrap 脚本的作用是：
-
-- 安装或刷新全局 plugin
-- 安装或刷新全局 `opencode.json`
-- 如果本机还没登录，就自动打开 `opencode auth login`
-- 可选直接继续启动 `opencode`
-
-第一次运行时，这个脚本会先自动执行 `opencode auth login`。在 OpenCode 的 provider 列表里会显示 `Entra LiteVertex` 和 `Entra LiteVertex - dev`。用户选中其中一个后，会直接看到 Microsoft 的 device code 链接和验证码，然后再进入 OpenCode。
-
-安装完成后，也可以在任意项目目录里直接使用原生命令：
-
-```bash
-opencode auth login
-opencode
-```
+这个命令会在需要时自动打开 `opencode auth login`，并在 OpenCode 的 provider 列表里显示 `Entra LiteVertex` 和 `Entra LiteVertex - dev`。用户选中其中一个后，会直接看到 Microsoft 的 device code 链接和验证码，然后再进入 OpenCode。
 
 如果只想单独刷新登录态，可以用：
 
 ```powershell
-.\scripts\bootstrap-opencode-entra.ps1 --login-only
+.\scripts\setup-opencode-entra-client.ps1 --login-only
 ```
 
 ```bash
-./scripts/bootstrap-opencode-entra.sh --login-only
+./scripts/setup-opencode-entra-client.sh --login-only
 ```
 
-### 8.3 用户日常使用
+### 8.2 用户日常使用
 
-完成一次 bootstrap 以后，日常不再需要这个脚本。通常直接用：
+完成一次 setup 以后，日常不再需要这个脚本。通常直接用：
 
 ```bash
 opencode

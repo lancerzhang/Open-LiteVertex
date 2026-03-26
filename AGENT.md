@@ -41,8 +41,6 @@ Supporting components:
 - `scripts/setup-entra-oss.ps1`: Entra app and group bootstrap for OSS auth flow
 - `scripts/setup-opencode-entra-client.ps1`: one-time user-machine setup for the global OpenCode plugin on Windows
 - `scripts/setup-opencode-entra-client.sh`: one-time user-machine setup for the global OpenCode plugin on Linux
-- `scripts/bootstrap-opencode-entra.ps1`: first-login helper for the global plugin auth flow on Windows
-- `scripts/bootstrap-opencode-entra.sh`: first-login helper for the global plugin auth flow on Linux
 - `scripts/start-opencode-entra-direct.ps1`: direct token-based OpenCode startup
 
 ## Working Rules
@@ -89,12 +87,6 @@ Get-Content .demo.env
 
 ```powershell
 .\scripts\setup-opencode-entra-client.ps1
-```
-
-### Run first-login helper once
-
-```powershell
-.\scripts\bootstrap-opencode-entra.ps1
 ```
 
 ### Start OpenCode with a direct Entra token

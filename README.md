@@ -29,8 +29,6 @@ Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Aut
 - `plugins/entra-litellm-auth.ts`: canonical source for the global OpenCode Entra plugin.
 - `scripts/setup-opencode-entra-client.ps1`: one-time user-machine setup for the global OpenCode plugin on Windows.
 - `scripts/setup-opencode-entra-client.sh`: one-time user-machine setup for the global OpenCode plugin on Linux.
-- `scripts/bootstrap-opencode-entra.ps1`: first-login helper for the global plugin flow on Windows.
-- `scripts/bootstrap-opencode-entra.sh`: first-login helper for the global plugin flow on Linux.
 - `scripts/start-opencode-entra-direct.ps1`: launch `OpenCode` with a fresh Entra bearer token directly.
 - `scripts/start-opencode-entra-direct.sh`: Linux wrapper for direct-token mode.
 - `scripts/get-entra-token.ps1`: fetch a delegated access token for the API app through native device code.
@@ -62,7 +60,7 @@ Step 2. Bootstrap Entra for LiteLLM OSS:
 
 User setup is per machine, not per project.
 
-Step 1. Run the one-time client setup:
+Run the one-time client setup:
 
 ```powershell
 .\scripts\setup-opencode-entra-client.ps1
@@ -72,21 +70,9 @@ Step 1. Run the one-time client setup:
 ./scripts/setup-opencode-entra-client.sh
 ```
 
-This step installs the global plugin into `~/.config/opencode/plugins/` and merges the fixed provider config into `~/.config/opencode/opencode.json`.
+This step installs the global plugin into `~/.config/opencode/plugins/`, merges the fixed provider config into `~/.config/opencode/opencode.json`, and then opens `opencode auth login` if the user is not logged in yet. It can also continue straight into `opencode`.
 
-Step 2. Run the first-login helper once:
-
-```powershell
-.\scripts\bootstrap-opencode-entra.ps1
-```
-
-```bash
-./scripts/bootstrap-opencode-entra.sh
-```
-
-This step refreshes the global client setup, opens `opencode auth login` if needed, and can continue into `opencode`.
-
-Step 3. Day-to-day usage after the first login:
+Day-to-day usage after the first login:
 
 ```bash
 opencode
@@ -186,23 +172,7 @@ The client setup step:
 - does not require `.demo.env`, `.entra.env`, or per-project environment variables for the plugin path
 - is mainly a one-time machine setup or upgrade step; after it finishes, you can use native `opencode` commands directly
 
-Bootstrap the client once:
-
-```powershell
-.\scripts\bootstrap-opencode-entra.ps1
-```
-
-```bash
-./scripts/bootstrap-opencode-entra.sh
-```
-
-This bootstrap step:
-
-- refreshes the one-time client setup
-- opens `opencode auth login` if the user is not logged in yet
-- can optionally launch `opencode` immediately
-
-After the bootstrap step, users can use native OpenCode commands directly from any project:
+After the client setup, users can use native OpenCode commands directly from any project:
 
 ```bash
 opencode auth login
@@ -217,16 +187,16 @@ In plugin mode:
 - the client config is global, so other projects can reuse it without extra env setup
 - `/connect` and `opencode auth login` now show two providers: `Entra LiteVertex` and `Entra LiteVertex - dev`
 - login uses OpenCode's built-in OAuth auto view, so the UI shows the Microsoft verification link and device code directly
-- on the first run, the bootstrap script opens `opencode auth login`, where these providers appear as selectable entries
+- on the first run, the setup command opens `opencode auth login`, where these providers appear as selectable entries
 
 If you only want to refresh the provider login without starting the TUI:
 
 ```powershell
-.\scripts\bootstrap-opencode-entra.ps1 --login-only
+.\scripts\setup-opencode-entra-client.ps1 --login-only
 ```
 
 ```bash
-./scripts/bootstrap-opencode-entra.sh --login-only
+./scripts/setup-opencode-entra-client.sh --login-only
 ```
 
 ### Direct Mode
