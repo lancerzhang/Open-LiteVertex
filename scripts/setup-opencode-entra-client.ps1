@@ -6,6 +6,29 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Web.Extensions
+
+function ConvertFrom-JsonCompat {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Json
+    )
+
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    return $serializer.DeserializeObject($Json.TrimStart([char]0xFEFF))
+}
+
+function Write-Utf8NoBomFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Content
+    )
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 $sourceFile = Join-Path $root "plugins\entra-litellm-auth.ts"
@@ -48,9 +71,9 @@ if (-not (Test-Path $configSourceFile)) {
 New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
 Copy-Item -Path $sourceFile -Destination $targetFile -Force
 
-$template = Get-Content $configSourceFile -Raw | ConvertFrom-Json -AsHashtable
+$template = ConvertFrom-JsonCompat -Json (Get-Content $configSourceFile -Raw)
 $current = if (Test-Path $globalConfigFile) {
-    Get-Content $globalConfigFile -Raw | ConvertFrom-Json -AsHashtable
+    ConvertFrom-JsonCompat -Json (Get-Content $globalConfigFile -Raw)
 } else {
     @{}
 }
@@ -80,7 +103,8 @@ foreach ($providerId in $template['provider'].Keys) {
 $current['model'] = $template['model']
 $current['small_model'] = $template['small_model']
 
-$current | ConvertTo-Json -Depth 100 | Set-Content -Path $globalConfigFile -Encoding UTF8
+$json = ($current | ConvertTo-Json -Depth 100) + [Environment]::NewLine
+Write-Utf8NoBomFile -Path $globalConfigFile -Content $json
 
 if (-not (Test-Path $globalCacheFile) -and (Test-Path $legacyCacheFile)) {
     Copy-Item -Path $legacyCacheFile -Destination $globalCacheFile -Force
