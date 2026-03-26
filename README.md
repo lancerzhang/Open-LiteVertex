@@ -25,13 +25,14 @@ Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Aut
 - `config/auth_handler.py`: OSS `custom_auth` handler for Entra groups, user upsert, and shared-team assignment.
 - `config/litellm-config.yaml`: base LiteLLM routing and model config.
 - `config/opencode.example.json`: example `OpenCode` provider config.
+- `config/opencode.global.json`: canonical global `OpenCode` provider config installed into `~/.config/opencode/opencode.json`.
 - `docs/opencode-litellm-entra-vertex-flow.md`: architecture and end-to-end flow.
 - `k8s/`: Kubernetes manifests.
 - `plugins/entra-litellm-auth.ts`: canonical source for the global OpenCode Entra plugin.
-- `scripts/install-opencode-entra-plugin.ps1`: install or refresh the global OpenCode plugin on Windows.
-- `scripts/install-opencode-entra-plugin.sh`: install or refresh the global OpenCode plugin on Linux.
-- `scripts/start-opencode-entra-plugin.ps1`: launch `OpenCode` with the global plugin auth path.
-- `scripts/start-opencode-entra-plugin.sh`: Linux wrapper for plugin mode.
+- `scripts/setup-opencode-entra-client.ps1`: one-time user-machine setup for the global OpenCode plugin on Windows.
+- `scripts/setup-opencode-entra-client.sh`: one-time user-machine setup for the global OpenCode plugin on Linux.
+- `scripts/bootstrap-opencode-entra.ps1`: first-login helper for the global plugin flow on Windows.
+- `scripts/bootstrap-opencode-entra.sh`: first-login helper for the global plugin flow on Linux.
 - `scripts/start-opencode-entra-direct.ps1`: launch `OpenCode` with a fresh Entra bearer token directly.
 - `scripts/start-opencode-entra-direct.sh`: Linux wrapper for direct-token mode.
 - `scripts/get-entra-token.ps1`: fetch a delegated access token for the API app through native device code.
@@ -40,16 +41,62 @@ Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Aut
 - `scripts/entra_client.py`: shared cross-platform client entrypoint used by direct-mode and token wrappers.
 - `scripts/setup-entra-oss.ps1`: create the Entra API app, the public client app for device code login, and the allowed security group.
 
-## Quick Start
+## Admin Init
 
-From the repo root:
+Administrator setup is only for the platform owner. It provisions or updates the shared backend that all users connect to.
+
+Step 1. Deploy the backend from the repo root:
 
 ```powershell
 .\scripts\deploy-demo.ps1
 Get-Content .demo.env
 ```
 
-Then point `OpenCode` at the generated endpoint/key using `opencode.json` or `config/opencode.example.json`.
+Step 2. Bootstrap Entra for LiteLLM OSS:
+
+```powershell
+.\scripts\setup-entra-oss.ps1 `
+  -TenantId "<your-tenant-id>" `
+  -AllowedGroupName "opencode-users"
+```
+
+## User Init
+
+User setup is per machine, not per project.
+
+Step 1. Run the one-time client setup:
+
+```powershell
+.\scripts\setup-opencode-entra-client.ps1
+```
+
+```bash
+./scripts/setup-opencode-entra-client.sh
+```
+
+This step installs the global plugin into `~/.config/opencode/plugins/` and merges the fixed provider config into `~/.config/opencode/opencode.json`.
+
+Step 2. Run the first-login helper once:
+
+```powershell
+.\scripts\bootstrap-opencode-entra.ps1
+```
+
+```bash
+./scripts/bootstrap-opencode-entra.sh
+```
+
+This step refreshes the global client setup, opens `opencode auth login` if needed, and can continue into `opencode`.
+
+Step 3. Day-to-day usage after the first login:
+
+```bash
+opencode
+```
+
+```bash
+opencode auth login
+```
 
 For the full OSS architecture and user flow, see:
 
@@ -115,54 +162,73 @@ The native device-code flow prints Microsoft Entra's verification URL and user c
 
 - `~/.config/opencode/entra-device-token.json`
 
-## OpenCode With Entra
+## Client Usage
 
 ### Plugin Mode
 
-The preferred path is the global OpenCode plugin. The canonical plugin source lives in this repo, but the runtime copy is installed into:
+The preferred path is the global OpenCode plugin plus a global OpenCode provider config. The runtime files are installed into:
 
 - `~/.config/opencode/plugins/entra-litellm-auth.ts`
+- `~/.config/opencode/opencode.json`
 
-Install or refresh it once:
+Run the one-time client setup:
 
 ```powershell
-.\scripts\install-opencode-entra-plugin.ps1
+.\scripts\setup-opencode-entra-client.ps1
 ```
 
 ```bash
-./scripts/install-opencode-entra-plugin.sh
+./scripts/setup-opencode-entra-client.sh
 ```
 
-The `start-opencode-entra-plugin` wrappers also run this install step automatically before launching `OpenCode`.
+The client setup step:
 
-Start OpenCode:
+- installs the user-level plugin
+- installs two fixed providers into the global OpenCode config
+- does not require `.demo.env`, `.entra.env`, or per-project environment variables for the plugin path
+- is mainly a one-time machine setup or upgrade step; after it finishes, you can use native `opencode` commands directly
+
+Bootstrap the client once:
 
 ```powershell
-.\scripts\start-opencode-entra-plugin.ps1
+.\scripts\bootstrap-opencode-entra.ps1
 ```
 
 ```bash
-./scripts/start-opencode-entra-plugin.sh
+./scripts/bootstrap-opencode-entra.sh
+```
+
+This bootstrap step:
+
+- refreshes the one-time client setup
+- opens `opencode auth login` if the user is not logged in yet
+- can optionally launch `opencode` immediately
+
+After the bootstrap step, users can use native OpenCode commands directly from any project:
+
+```bash
+opencode auth login
+opencode
 ```
 
 In plugin mode:
 
 - `OpenCode` keeps talking directly to LiteLLM
 - the plugin injects `Authorization: Bearer <entra_access_token>` on outbound `litellm` requests
-- token refresh uses the same native device-code cache in `~/.config/opencode/entra-device-token.json`
-- the plugin is global, so other projects can reuse it as long as they provide `ENTRA_*` config and a `litellm` provider
-- the provider shows up in `/connect` and `opencode auth login` as `Entra LiteVertex`
+- token refresh uses per-provider native device-code caches in `~/.config/opencode/entra-device-token.json` and `~/.config/opencode/entra-device-token.dev.json`
+- the client config is global, so other projects can reuse it without extra env setup
+- `/connect` and `opencode auth login` now show two providers: `Entra LiteVertex` and `Entra LiteVertex - dev`
 - login uses OpenCode's built-in OAuth auto view, so the UI shows the Microsoft verification link and device code directly
-- on the first run, the start script opens `opencode auth login`, where `Entra LiteVertex` appears as a selectable provider
+- on the first run, the bootstrap script opens `opencode auth login`, where these providers appear as selectable entries
 
 If you only want to refresh the provider login without starting the TUI:
 
 ```powershell
-.\scripts\start-opencode-entra-plugin.ps1 --login-only
+.\scripts\bootstrap-opencode-entra.ps1 --login-only
 ```
 
 ```bash
-./scripts/start-opencode-entra-plugin.sh --login-only
+./scripts/bootstrap-opencode-entra.sh --login-only
 ```
 
 ### Direct Mode

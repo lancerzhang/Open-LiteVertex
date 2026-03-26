@@ -33,14 +33,16 @@ Supporting components:
 - `config/litellm-config.yaml`: base LiteLLM routing and model config
 - `config/auth_handler.py`: Entra JWT validation, group gating, user upsert, and shared-team helpers
 - `config/opencode.example.json`: example OpenCode provider configuration
+- `config/opencode.global.json`: canonical global OpenCode provider configuration
 - `plugins/entra-litellm-auth.ts`: canonical source for the global OpenCode plugin
 - `docker/`: Dockerfiles for the custom LiteLLM image
 - `k8s/`: Kubernetes manifests for namespace, Postgres, and LiteLLM resources
 - `scripts/deploy-demo.ps1`: end-to-end bootstrap and deployment entrypoint
 - `scripts/setup-entra-oss.ps1`: Entra app and group bootstrap for OSS auth flow
-- `scripts/install-opencode-entra-plugin.ps1`: install the global OpenCode plugin on Windows
-- `scripts/install-opencode-entra-plugin.sh`: install the global OpenCode plugin on Linux
-- `scripts/start-opencode-entra-plugin.ps1`: start OpenCode through the global plugin auth flow, auto-login on first run
+- `scripts/setup-opencode-entra-client.ps1`: one-time user-machine setup for the global OpenCode plugin on Windows
+- `scripts/setup-opencode-entra-client.sh`: one-time user-machine setup for the global OpenCode plugin on Linux
+- `scripts/bootstrap-opencode-entra.ps1`: first-login helper for the global plugin auth flow on Windows
+- `scripts/bootstrap-opencode-entra.sh`: first-login helper for the global plugin auth flow on Linux
 - `scripts/start-opencode-entra-direct.ps1`: direct token-based OpenCode startup
 
 ## Working Rules
@@ -83,16 +85,16 @@ Get-Content .demo.env
 .\scripts\setup-entra-oss.ps1 -TenantId "<tenant-id>" -AllowedGroupName "opencode-users"
 ```
 
-### Install the global OpenCode plugin
+### Run one-time user-machine setup
 
 ```powershell
-.\scripts\install-opencode-entra-plugin.ps1
+.\scripts\setup-opencode-entra-client.ps1
 ```
 
-### Start OpenCode with plugin auth
+### Run first-login helper once
 
 ```powershell
-.\scripts\start-opencode-entra-plugin.ps1
+.\scripts\bootstrap-opencode-entra.ps1
 ```
 
 ### Start OpenCode with a direct Entra token
@@ -110,6 +112,7 @@ When editing this repository:
 - prefer small, explicit changes over broad refactors
 - keep both Windows and Linux client paths in mind
 - document any new environment variables in `README.md`
+- when changing the client login flow, keep the global config in `~/.config/opencode/opencode.json` aligned with the plugin behavior
 
 ## Naming Direction
 

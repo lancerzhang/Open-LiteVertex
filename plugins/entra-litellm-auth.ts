@@ -2,16 +2,17 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "n
 import os from "node:os"
 import path from "node:path"
 
-const PROVIDER_ID = "litellm"
 const DUMMY_API_KEY = "opencode-entra-plugin-placeholder"
 const TOKEN_REFRESH_SKEW_SECONDS = 300
-const DEFAULT_TOKEN_CACHE_PATH = path.join(os.homedir(), ".config", "opencode", "entra-device-token.json")
 
 type EntraSettings = {
+  providerId: string
+  providerName: string
   tenantId: string
   clientId: string
   publicClientId: string
   scope: string
+  baseURL: string
   tokenCachePath: string
 }
 
@@ -37,58 +38,33 @@ type StoredOAuthAuth = {
 
 class InteractionRequiredError extends Error {}
 
-function resolveRoot(input: any): string {
-  const raw = input?.worktree || input?.directory || process.cwd()
-  return path.resolve(String(raw))
-}
-
-function loadDotEnv(filePath: string): Record<string, string> {
-  if (!existsSync(filePath)) return {}
-
-  const env: Record<string, string> = {}
-  for (const rawLine of readFileSync(filePath, "utf8").split(/\r?\n/)) {
-    const line = rawLine.trim()
-    if (!line || line.startsWith("#")) continue
-    const separator = line.indexOf("=")
-    if (separator < 0) continue
-    const key = line.slice(0, separator).trim()
-    const value = line.slice(separator + 1).trim()
-    env[key] = value
-  }
-  return env
+const PROVIDER_SETTINGS: Record<string, EntraSettings> = {
+  litellm: {
+    providerId: "litellm",
+    providerName: "Entra LiteVertex",
+    tenantId: "2647159d-89f7-4c5e-aa37-c3218de7b638",
+    clientId: "f5f8f478-9688-4984-a83e-2136b3871838",
+    publicClientId: "ab845a82-90aa-4fff-967f-77a6f9766687",
+    scope: "api://f5f8f478-9688-4984-a83e-2136b3871838/access_as_user offline_access",
+    baseURL: "http://35.229.226.109/v1",
+    tokenCachePath: path.join(os.homedir(), ".config", "opencode", "entra-device-token.json"),
+  },
+  "litellm-dev": {
+    providerId: "litellm-dev",
+    providerName: "Entra LiteVertex - dev",
+    tenantId: "2647159d-89f7-4c5e-aa37-c3218de7b638",
+    clientId: "f5f8f478-9688-4984-a83e-2136b3871838",
+    publicClientId: "ab845a82-90aa-4fff-967f-77a6f9766687",
+    scope: "api://f5f8f478-9688-4984-a83e-2136b3871838/access_as_user offline_access",
+    baseURL: "http://35.229.226.109/v1",
+    tokenCachePath: path.join(os.homedir(), ".config", "opencode", "entra-device-token.dev.json"),
+  },
 }
 
 function normalizeScope(scope: string): string {
   const scopes = scope.split(/\s+/).map((part) => part.trim()).filter(Boolean)
-  if (!scopes.includes("offline_access")) {
-    scopes.push("offline_access")
-  }
+  if (!scopes.includes("offline_access")) scopes.push("offline_access")
   return scopes.join(" ")
-}
-
-function resolveEntraSettings(root: string): EntraSettings | null {
-  const envFilePath = process.env.ENTRA_ENV_PATH || path.join(root, ".entra.env")
-  const fileEnv = loadDotEnv(envFilePath)
-  const merged = { ...fileEnv, ...process.env }
-
-  const tenantId = String(merged.ENTRA_TENANT_ID ?? "").trim()
-  const clientId = String(merged.ENTRA_CLIENT_ID ?? "").trim()
-  const publicClientId = String(merged.ENTRA_PUBLIC_CLIENT_ID ?? "").trim()
-
-  if (!tenantId || !clientId || !publicClientId) {
-    return null
-  }
-
-  const scope = String(merged.ENTRA_SCOPE ?? `api://${clientId}/access_as_user`).trim() || `api://${clientId}/access_as_user`
-  const tokenCachePath = String(merged.ENTRA_TOKEN_CACHE_PATH ?? DEFAULT_TOKEN_CACHE_PATH).trim() || DEFAULT_TOKEN_CACHE_PATH
-
-  return {
-    tenantId,
-    clientId,
-    publicClientId,
-    scope,
-    tokenCachePath,
-  }
 }
 
 function isPluginDisabled(): boolean {
@@ -182,7 +158,7 @@ async function requestDeviceCode(settings: EntraSettings): Promise<any> {
     scope: normalizeScope(settings.scope),
   })
   if (status !== 200) {
-    throw new Error(formatEntraError("Microsoft Entra device-code request failed.", payload))
+    throw new Error(formatEntraError(`Microsoft Entra device-code request failed for ${settings.providerName}.`, payload))
   }
   return payload
 }
@@ -215,16 +191,16 @@ async function pollForDeviceCodeToken(settings: EntraSettings, deviceCodePayload
       continue
     }
     if (errorCode === "authorization_declined") {
-      throw new Error("Microsoft Entra device-code login was declined by the user.")
+      throw new Error(`Microsoft Entra device-code login was declined for ${settings.providerName}.`)
     }
     if (errorCode === "expired_token") {
-      throw new Error("Microsoft Entra device-code login expired before it was completed.")
+      throw new Error(`Microsoft Entra device-code login expired before completion for ${settings.providerName}.`)
     }
 
-    throw new Error(formatEntraError("Microsoft Entra device-code login failed.", payload))
+    throw new Error(formatEntraError(`Microsoft Entra device-code login failed for ${settings.providerName}.`, payload))
   }
 
-  throw new Error("Microsoft Entra device-code login timed out before authorization completed.")
+  throw new Error(`Microsoft Entra device-code login timed out for ${settings.providerName}.`)
 }
 
 async function refreshToken(settings: EntraSettings, refreshTokenValue: string): Promise<any> {
@@ -241,9 +217,9 @@ async function refreshToken(settings: EntraSettings, refreshTokenValue: string):
 
   const errorCode = String(payload?.error ?? "").trim()
   if (errorCode === "invalid_grant" || errorCode === "interaction_required") {
-    throw new InteractionRequiredError("Microsoft Entra requires the user to log in again.")
+    throw new InteractionRequiredError(`Microsoft Entra requires the user to log in again for ${settings.providerName}.`)
   }
-  throw new Error(formatEntraError("Microsoft Entra refresh-token request failed.", payload))
+  throw new Error(formatEntraError(`Microsoft Entra refresh-token request failed for ${settings.providerName}.`, payload))
 }
 
 function buildTokenPayload(payload: any): TokenPayload {
@@ -279,8 +255,7 @@ function buildTokenCacheRecord(
 }
 
 function getRefreshToken(payload: any, fallback?: string): string | undefined {
-  return String(payload?.refresh_token ?? fallback ?? "")
-    .trim() || undefined
+  return String(payload?.refresh_token ?? fallback ?? "").trim() || undefined
 }
 
 function tokenCacheFromAuth(settings: EntraSettings, auth: unknown): TokenCacheRecord | undefined {
@@ -292,10 +267,13 @@ function tokenCacheFromAuth(settings: EntraSettings, auth: unknown): TokenCacheR
   if (!accessToken) return undefined
 
   const expiresMs = Number((auth as StoredOAuthAuth).expires ?? 0)
-  const expiresOnEpoch =
-    Number.isFinite(expiresMs) && expiresMs > 0 ? Math.floor(expiresMs / 1000) : undefined
+  const expiresOnEpoch = Number.isFinite(expiresMs) && expiresMs > 0 ? Math.floor(expiresMs / 1000) : undefined
 
-  return buildTokenCacheRecord(settings, { accessToken, expiresOnEpoch }, String((auth as StoredOAuthAuth).refresh ?? "").trim() || undefined)
+  return buildTokenCacheRecord(
+    settings,
+    { accessToken, expiresOnEpoch },
+    String((auth as StoredOAuthAuth).refresh ?? "").trim() || undefined,
+  )
 }
 
 async function acquireAccessToken(settings: EntraSettings, allowInteraction: boolean, auth?: unknown): Promise<TokenPayload> {
@@ -333,124 +311,118 @@ async function acquireAccessToken(settings: EntraSettings, allowInteraction: boo
   }
 
   if (!allowInteraction) {
-    throw new Error("No reusable Entra device-code token is available. Run `opencode auth login --provider litellm` first.")
+    throw new Error(`No reusable Entra device-code token is available for ${settings.providerName}. Run \`opencode auth login\` first.`)
   }
 
-  throw new InteractionRequiredError("Microsoft Entra requires interactive device-code login.")
+  throw new InteractionRequiredError(`Microsoft Entra requires interactive device-code login for ${settings.providerName}.`)
 }
 
 async function completeDeviceCodeLogin(settings: EntraSettings, deviceCodePayload: any) {
   const tokenResponse = await pollForDeviceCodeToken(settings, deviceCodePayload)
   const token = buildTokenPayload(tokenResponse)
-  const refreshToken = getRefreshToken(tokenResponse)
-  writeTokenCache(settings, buildTokenCacheRecord(settings, token, refreshToken))
-
+  const refreshTokenValue = getRefreshToken(tokenResponse)
+  writeTokenCache(settings, buildTokenCacheRecord(settings, token, refreshTokenValue))
   return {
     token,
-    refreshToken,
+    refreshToken: refreshTokenValue,
   }
 }
 
-export const EntraLiteLLMAuthPlugin = async (input: any) => {
-  const root = resolveRoot(input)
-  let cachedToken: TokenPayload | undefined
-  let cachedTokenKey = ""
-  let pendingToken: Promise<TokenPayload> | undefined
+function createEntraAuthPlugin(settings: EntraSettings) {
+  return async () => {
+    let cachedToken: TokenPayload | undefined
+    let pendingToken: Promise<TokenPayload> | undefined
 
-  const getToken = async (settings: EntraSettings, allowInteraction: boolean, auth?: unknown): Promise<TokenPayload> => {
-    const settingsKey = JSON.stringify(settings)
-    if (!allowInteraction && cachedTokenKey === settingsKey && isFreshToken(cachedToken)) {
-      return cachedToken!
-    }
-    if (pendingToken) {
+    const getToken = async (allowInteraction: boolean, auth?: unknown): Promise<TokenPayload> => {
+      if (!allowInteraction && isFreshToken(cachedToken)) {
+        return cachedToken!
+      }
+      if (pendingToken) {
+        return pendingToken
+      }
+
+      pendingToken = Promise.resolve()
+        .then(() => acquireAccessToken(settings, allowInteraction, auth))
+        .then((token) => {
+          cachedToken = token
+          return token
+        })
+        .finally(() => {
+          pendingToken = undefined
+        })
+
       return pendingToken
     }
 
-    pendingToken = Promise.resolve()
-      .then(() => acquireAccessToken(settings, allowInteraction, auth))
-      .then((token) => {
-        cachedToken = token
-        cachedTokenKey = settingsKey
-        return token
-      })
-      .finally(() => {
-        pendingToken = undefined
-      })
+    return {
+      auth: {
+        provider: settings.providerId,
+        async loader(getAuth: () => Promise<any>) {
+          return {
+            baseURL: settings.baseURL,
+            apiKey: DUMMY_API_KEY,
+            async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
+              if (isPluginDisabled()) {
+                return fetch(requestInput, init)
+              }
 
-    return pendingToken
-  }
+              const auth = await getAuth()
+              if (!auth) {
+                return fetch(requestInput, init)
+              }
 
-  return {
-    auth: {
-      provider: PROVIDER_ID,
-      async loader(getAuth: () => Promise<any>) {
-        return {
-          apiKey: process.env.LITELLM_API_KEY || DUMMY_API_KEY,
-          async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
-            if (isPluginDisabled()) {
-              return fetch(requestInput, init)
-            }
+              const token = await getToken(false, auth).catch((error) => {
+                throw new Error(
+                  `Unable to refresh the Entra token for ${settings.providerName}. ${error instanceof Error ? error.message : String(error)}`,
+                )
+              })
 
-            const auth = await getAuth()
-            const settings = resolveEntraSettings(root)
-            if (!auth || !settings) {
-              return fetch(requestInput, init)
-            }
+              const request = new Request(requestInput, init)
+              request.headers.delete("authorization")
+              request.headers.delete("Authorization")
+              request.headers.delete("x-api-key")
+              request.headers.delete("X-API-Key")
+              request.headers.set("Authorization", `Bearer ${token.accessToken}`)
 
-            const token = await getToken(settings, false, auth).catch((error) => {
-              throw new Error(
-                `Unable to refresh the Entra token for LiteLLM. ${error instanceof Error ? error.message : String(error)}`,
-              )
-            })
-
-            const request = new Request(requestInput, init)
-            request.headers.delete("authorization")
-            request.headers.delete("Authorization")
-            request.headers.delete("x-api-key")
-            request.headers.delete("X-API-Key")
-            request.headers.set("Authorization", `Bearer ${token.accessToken}`)
-
-            return fetch(request)
-          },
-        }
-      },
-      methods: [
-        {
-          type: "oauth" as const,
-          label: "Microsoft Entra Device Code",
-          async authorize() {
-            const settings = resolveEntraSettings(root)
-            if (!settings) {
-              throw new Error(
-                "Missing Entra config. Export ENTRA_TENANT_ID, ENTRA_CLIENT_ID, ENTRA_PUBLIC_CLIENT_ID, or create .entra.env first.",
-              )
-            }
-
-            const deviceCodePayload = await requestDeviceCode(settings)
-            const verificationUrl =
-              String(deviceCodePayload?.verification_uri_complete ?? "").trim() ||
-              String(deviceCodePayload?.verification_uri ?? "").trim()
-            const userCode = String(deviceCodePayload?.user_code ?? "").trim()
-
-            return {
-              url: verificationUrl,
-              instructions: `Enter code: ${userCode}`,
-              method: "auto" as const,
-              callback: async () => {
-                const { token, refreshToken } = await completeDeviceCodeLogin(settings, deviceCodePayload)
-                return {
-                  type: "success" as const,
-                  refresh: refreshToken || token.accessToken,
-                  access: token.accessToken,
-                  expires: Number(token.expiresOnEpoch ?? 0) > 0 ? Number(token.expiresOnEpoch) * 1000 : Date.now(),
-                }
-              },
-            }
-          },
+              return fetch(request)
+            },
+          }
         },
-      ],
-    },
+        methods: [
+          {
+            type: "oauth" as const,
+            label: "Microsoft Entra Device Code",
+            async authorize() {
+              const deviceCodePayload = await requestDeviceCode(settings)
+              const verificationUrl =
+                String(deviceCodePayload?.verification_uri_complete ?? "").trim() ||
+                String(deviceCodePayload?.verification_uri ?? "").trim()
+              const userCode = String(deviceCodePayload?.user_code ?? "").trim()
+
+              return {
+                url: verificationUrl,
+                instructions: `Enter code: ${userCode}`,
+                method: "auto" as const,
+                callback: async () => {
+                  const { token, refreshToken } = await completeDeviceCodeLogin(settings, deviceCodePayload)
+                  return {
+                    type: "success" as const,
+                    refresh: refreshToken || token.accessToken,
+                    access: token.accessToken,
+                    expires: Number(token.expiresOnEpoch ?? 0) > 0 ? Number(token.expiresOnEpoch) * 1000 : Date.now(),
+                  }
+                },
+              }
+            },
+          },
+        ],
+      },
+    }
   }
 }
 
-export default EntraLiteLLMAuthPlugin
+const prodPlugin = createEntraAuthPlugin(PROVIDER_SETTINGS.litellm)
+const devPlugin = createEntraAuthPlugin(PROVIDER_SETTINGS["litellm-dev"])
+
+export const EntraLiteVertexAuthPlugin = prodPlugin
+export const EntraLiteVertexDevAuthPlugin = devPlugin
