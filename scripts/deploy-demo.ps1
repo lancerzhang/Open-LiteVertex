@@ -218,7 +218,7 @@ $entraEnvPath = Join-Path $root ".entra.env"
 $entraEnv = Read-DotEnvFile -Path $entraEnvPath
 $imageRepository = "litellm-demo"
 $imageUri = "$Region-docker.pkg.dev/$ProjectId/$imageRepository/litellm-entra-oss:latest"
-$allowedModels = "vertex-gemini-2.5-flash,vertex-gemini-2.5-flash-lite,vertex-gemini-2.5-pro"
+$allowedModels = "vertex-gemini-2.5-flash,vertex-gemini-2.5-flash-lite,vertex-gemini-2.5-pro,vertex-gemini-3-pro-preview,vertex-gemini-3.1-pro-preview"
 
 gcloud config set project $ProjectId | Out-Null
 gcloud services enable `

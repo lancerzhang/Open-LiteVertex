@@ -25,6 +25,9 @@
         "vertex-gemini-3-pro-preview": {
           "name": "Gemini 3 Pro Preview"
         },
+        "vertex-gemini-3.1-pro-preview": {
+          "name": "Gemini 3.1 Pro Preview"
+        },
         "vertex-claude-sonnet-4-6": {
           "name": "Claude Sonnet 4.6"
         }
@@ -49,6 +52,9 @@
         },
         "vertex-gemini-3-pro-preview": {
           "name": "Gemini 3 Pro Preview"
+        },
+        "vertex-gemini-3.1-pro-preview": {
+          "name": "Gemini 3.1 Pro Preview"
         },
         "vertex-claude-sonnet-4-6": {
           "name": "Claude Sonnet 4.6"

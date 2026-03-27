@@ -225,4 +225,5 @@ The repo ships these model aliases in `opencode.json` and `config/opencode.examp
 - `vertex-gemini-2.5-flash-lite`
 - `vertex-gemini-2.5-pro`
 - `vertex-gemini-3-pro-preview`
+- `vertex-gemini-3.1-pro-preview`
 - `vertex-claude-sonnet-4-6`

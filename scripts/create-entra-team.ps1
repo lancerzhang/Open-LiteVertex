@@ -11,7 +11,9 @@ param(
     [string[]]$Models = @(
         "vertex-gemini-2.5-flash",
         "vertex-gemini-2.5-flash-lite",
-        "vertex-gemini-2.5-pro"
+        "vertex-gemini-2.5-pro",
+        "vertex-gemini-3-pro-preview",
+        "vertex-gemini-3.1-pro-preview"
     )
 )
 
@@ -27,4 +29,3 @@ Invoke-RestMethod `
     -Headers @{ Authorization = "Bearer $MasterKey" } `
     -ContentType "application/json" `
     -Body $body
-
