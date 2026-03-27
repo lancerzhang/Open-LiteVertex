@@ -62,6 +62,11 @@ spec:
                 secretKeyRef:
                   name: litellm-secrets
                   key: entra-client-id
+            - name: ENTRA_PUBLIC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: entra-public-client-id
             - name: ENTRA_ALLOWED_GROUP_IDS
               valueFrom:
                 secretKeyRef:

@@ -307,6 +307,7 @@ if (-not $saltKey) {
 $databaseUrl = "postgresql://litellm:$postgresPassword@postgres.$Namespace.svc.cluster.local:5432/litellm"
 $entraTenantId = $entraEnv["ENTRA_TENANT_ID"]
 $entraClientId = $entraEnv["ENTRA_CLIENT_ID"]
+$entraPublicClientId = $entraEnv["ENTRA_PUBLIC_CLIENT_ID"]
 $entraAllowedGroupIds = $entraEnv["ENTRA_ALLOWED_GROUP_IDS"]
 if (-not $entraAllowedGroupIds) {
     $entraAllowedGroupIds = $entraEnv["ENTRA_ALLOWED_GROUP_ID"]
@@ -373,6 +374,7 @@ stringData:
   vertex-location: "$VertexLocation"
   entra-tenant-id: "$entraTenantId"
   entra-client-id: "$entraClientId"
+  entra-public-client-id: "$entraPublicClientId"
   entra-allowed-group-ids: "$entraAllowedGroupIds"
   entra-allowed-audiences: "$entraAllowedAudiences"
   entra-issuer: "$entraIssuer"

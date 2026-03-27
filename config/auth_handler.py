@@ -8,10 +8,10 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlsplit
 
-import httpx
 import jwt
 from fastapi import HTTPException, Request, status
 from jwt import InvalidTokenError, PyJWKClient
+from prisma import Json
 
 from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
 from litellm.proxy.auth.auth_checks import get_key_object
@@ -28,7 +28,6 @@ DEFAULT_ALLOWED_MODELS = [
 ]
 DEFAULT_PROXY_ADMIN_USER_ID = "litellm-proxy-admin"
 DEFAULT_ENTRA_SHARED_TEAM_ALIAS = "entra-allowed-users"
-DEFAULT_INTERNAL_MANAGEMENT_BASE_URL = "http://127.0.0.1:4000"
 TRACE_LOG_PREFIX = "vertex-trace"
 SENSITIVE_HEADER_NAMES = {
     "authorization",
@@ -263,10 +262,6 @@ def _get_shared_team_member_budget() -> float:
     return _get_user_budget()
 
 
-def _get_internal_management_base_url() -> str:
-    return os.getenv("LITELLM_INTERNAL_BASE_URL", "").strip().rstrip("/") or DEFAULT_INTERNAL_MANAGEMENT_BASE_URL
-
-
 def _is_jwt(token: str) -> bool:
     return token.count(".") == 2
 
@@ -388,9 +383,31 @@ def _decode_entra_token(token: str) -> Dict[str, Any]:
             options={"require": ["exp", "iss", "aud"]},
         )
     except InvalidTokenError as exc:
+        actual_aud = None
+        try:
+            unverified_claims = jwt.decode(
+                token,
+                options={
+                    "verify_signature": False,
+                    "verify_exp": False,
+                    "verify_aud": False,
+                    "verify_iss": False,
+                },
+            )
+            if isinstance(unverified_claims, dict):
+                actual_aud = unverified_claims.get("aud")
+        except Exception:
+            actual_aud = None
+
+        detail = f"Invalid Entra access token: {exc}"
+        if actual_aud is not None:
+            detail += (
+                f" (token aud={actual_aud!r}, "
+                f"allowed audiences={settings['allowed_audiences']})"
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid Entra access token: {exc}",
+            detail=detail,
         ) from exc
 
 
@@ -414,54 +431,6 @@ def _build_jwt_claims_metadata(claims: Dict[str, Any], matched_group_ids: List[s
     }
 
 
-async def _call_management_api(
-    method: str,
-    path: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-    json_payload: Optional[Dict[str, Any]] = None,
-    expected_statuses: Optional[set[int]] = None,
-) -> Optional[Any]:
-    master_key = os.getenv("LITELLM_MASTER_KEY", "").strip()
-    if not master_key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="LiteLLM team sync requires LITELLM_MASTER_KEY to be configured.",
-        )
-
-    base_url = _get_internal_management_base_url()
-    url = f"{base_url}{path}"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.request(
-            method,
-            url,
-            headers={"Authorization": f"Bearer {master_key}"},
-            params=params,
-            json=json_payload,
-        )
-
-    allowed_statuses = expected_statuses or {200}
-    if response.status_code in allowed_statuses:
-        if response.status_code == 404:
-            return None
-        if response.content:
-            return response.json()
-        return None
-
-    detail = response.text
-    try:
-        payload = response.json()
-        if isinstance(payload, dict):
-            detail = payload.get("detail") or payload.get("error", {}).get("message") or response.text
-    except Exception:
-        pass
-
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=f"LiteLLM management API call failed for {path}: {detail}",
-    )
-
-
 def _build_shared_team_metadata(shared_team_id: str, matched_group_ids: List[str]) -> Dict[str, Any]:
     return {
         "auth_provider": "entra",
@@ -472,12 +441,184 @@ def _build_shared_team_metadata(shared_team_id: str, matched_group_ids: List[str
     }
 
 
+def _coerce_json_object(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    return {}
+
+
+def _coerce_team_members(value: Any) -> List[Dict[str, Any]]:
+    if isinstance(value, str) and value.strip():
+        try:
+            value = json.loads(value)
+        except Exception:
+            return []
+
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(value, list):
+        return normalized
+
+    for raw_member in value:
+        if not isinstance(raw_member, dict):
+            continue
+        raw_user_id = raw_member.get("user_id")
+        if not isinstance(raw_user_id, str) or not raw_user_id.strip():
+            continue
+        role = raw_member.get("role")
+        normalized.append(
+            {
+                "user_id": raw_user_id.strip(),
+                "role": role.strip() if isinstance(role, str) and role.strip() else "user",
+                "user_email": raw_member.get("user_email"),
+            }
+        )
+    return normalized
+
+
+def _upsert_team_member_entry(
+    members_with_roles: List[Dict[str, Any]],
+    *,
+    user_id: str,
+    role: str,
+    user_email: Optional[str],
+) -> List[Dict[str, Any]]:
+    updated: List[Dict[str, Any]] = []
+    replaced = False
+    for member in members_with_roles:
+        if member.get("user_id") == user_id:
+            updated.append(
+                {
+                    "user_id": user_id,
+                    "role": role,
+                    "user_email": user_email,
+                }
+            )
+            replaced = True
+            continue
+        updated.append(member)
+
+    if not replaced:
+        updated.append(
+            {
+                "user_id": user_id,
+                "role": role,
+                "user_email": user_email,
+            }
+        )
+    return updated
+
+
+def _lists_match(left: List[str], right: List[str]) -> bool:
+    return sorted(left) == sorted(right)
+
+
+def _dedupe_list(values: Optional[List[str]], extra_value: Optional[str] = None) -> List[str]:
+    deduped: List[str] = []
+    for value in values or []:
+        if isinstance(value, str) and value and value not in deduped:
+            deduped.append(value)
+    if isinstance(extra_value, str) and extra_value and extra_value not in deduped:
+        deduped.append(extra_value)
+    return deduped
+
+
+async def _ensure_user_team_assignment(
+    *,
+    prisma_client: Any,
+    user_api_key_cache: Any,
+    user_id: str,
+    team_id: str,
+) -> None:
+    existing_user = await prisma_client.db.litellm_usertable.find_unique(where={"user_id": user_id})
+    if existing_user is None:
+        return
+
+    current_teams = list(getattr(existing_user, "teams", None) or [])
+    teams = _dedupe_list(current_teams, team_id)
+    if teams != current_teams:
+        await prisma_client.db.litellm_usertable.update(
+            where={"user_id": user_id},
+            data={"teams": {"set": teams}},
+        )
+        try:
+            user_api_key_cache.delete_cache(key=user_id)
+        except Exception:
+            pass
+
+
+async def _ensure_team_member_budget(
+    *,
+    prisma_client: Any,
+    user_id: str,
+    team_id: str,
+    team_member_budget: Optional[float],
+) -> None:
+    membership_where = {
+        "user_id_team_id": {
+            "user_id": user_id,
+            "team_id": team_id,
+        }
+    }
+    membership = await prisma_client.db.litellm_teammembership.find_unique(where=membership_where)
+
+    budget_id = getattr(membership, "budget_id", None)
+    if team_member_budget is not None:
+        if isinstance(budget_id, str) and budget_id.strip():
+            await prisma_client.db.litellm_budgettable.update(
+                where={"budget_id": budget_id.strip()},
+                data={
+                    "max_budget": team_member_budget,
+                    "updated_by": DEFAULT_PROXY_ADMIN_USER_ID,
+                },
+            )
+        else:
+            budget = await prisma_client.db.litellm_budgettable.create(
+                data={
+                    "max_budget": team_member_budget,
+                    "created_by": DEFAULT_PROXY_ADMIN_USER_ID,
+                    "updated_by": DEFAULT_PROXY_ADMIN_USER_ID,
+                }
+            )
+            budget_id = budget.budget_id
+
+    if membership is None:
+        create_data: Dict[str, Any] = {
+            "team_id": team_id,
+            "user_id": user_id,
+        }
+        if isinstance(budget_id, str) and budget_id.strip():
+            create_data["budget_id"] = budget_id.strip()
+        await prisma_client.db.litellm_teammembership.create(data=create_data)
+        return
+
+    if isinstance(budget_id, str) and budget_id.strip() and budget_id != getattr(membership, "budget_id", None):
+        await prisma_client.db.litellm_teammembership.update(
+            where=membership_where,
+            data={"budget_id": budget_id.strip()},
+        )
+
+
 async def _ensure_shared_team_membership(
     *,
     user_id: str,
     user_email: Optional[str],
     matched_group_ids: List[str],
 ) -> Optional[Dict[str, Any]]:
+    from litellm.proxy.proxy_server import prisma_client, user_api_key_cache
+
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="LiteLLM database is not connected.",
+        )
+
     shared_team_id = _get_shared_team_id(matched_group_ids)
     if not shared_team_id:
         return None
@@ -490,84 +631,119 @@ async def _ensure_shared_team_membership(
 
     async with _TEAM_SYNC_LOCK:
         if shared_team_id not in _ENSURED_TEAM_IDS:
-            team_info_response = await _call_management_api(
-                "GET",
-                "/team/info",
-                params={"team_id": shared_team_id},
-                expected_statuses={200, 404},
+            existing_team = await prisma_client.db.litellm_teamtable.find_unique(
+                where={"team_id": shared_team_id}
             )
-            team_info = None
-            if isinstance(team_info_response, dict):
-                nested_team_info = team_info_response.get("team_info")
-                if isinstance(nested_team_info, dict):
-                    team_info = nested_team_info
-            team_payload = {
-                "team_id": shared_team_id,
-                "team_alias": shared_team_alias,
-                "models": models,
-                "max_budget": team_budget,
-                "budget_duration": team_budget_duration,
-                "metadata": _build_shared_team_metadata(
+            existing_metadata = _coerce_json_object(getattr(existing_team, "metadata", None))
+            merged_metadata = dict(existing_metadata)
+            merged_metadata.update(
+                _build_shared_team_metadata(
                     shared_team_id=shared_team_id,
                     matched_group_ids=matched_group_ids,
-                ),
-            }
-            if team_info is None:
-                await _call_management_api(
-                    "POST",
-                    "/team/new",
-                    json_payload=team_payload,
-                    expected_statuses={200},
+                )
+            )
+
+            desired_members = _coerce_team_members(getattr(existing_team, "members_with_roles", None))
+            desired_members = _upsert_team_member_entry(
+                desired_members,
+                user_id=DEFAULT_PROXY_ADMIN_USER_ID,
+                role="admin",
+                user_email=None,
+            )
+            desired_members = _upsert_team_member_entry(
+                desired_members,
+                user_id=user_id,
+                role="user",
+                user_email=user_email,
+            )
+
+            if existing_team is None:
+                await prisma_client.db.litellm_teamtable.create(
+                    data={
+                        "team_id": shared_team_id,
+                        "team_alias": shared_team_alias,
+                        "admins": [],
+                        "members": [],
+                        "members_with_roles": Json(desired_members),
+                        "metadata": Json(merged_metadata),
+                        "max_budget": team_budget,
+                        "models": models,
+                        "budget_duration": team_budget_duration,
+                        "budget_reset_at": get_budget_reset_time(team_budget_duration),
+                        "blocked": False,
+                    }
                 )
             else:
-                needs_update = (
-                    team_info.get("team_alias") != shared_team_alias
-                    or sorted(team_info.get("models") or []) != sorted(models)
-                    or team_info.get("max_budget") != team_budget
-                    or team_info.get("budget_duration") != team_budget_duration
-                )
-                if needs_update:
-                    await _call_management_api(
-                        "POST",
-                        "/team/update",
-                        json_payload=team_payload,
-                        expected_statuses={200},
+                update_data: Dict[str, Any] = {}
+                if getattr(existing_team, "team_alias", None) != shared_team_alias:
+                    update_data["team_alias"] = shared_team_alias
+                if not _lists_match(list(getattr(existing_team, "models", None) or []), models):
+                    update_data["models"] = models
+                if getattr(existing_team, "max_budget", None) != team_budget:
+                    update_data["max_budget"] = team_budget
+                if getattr(existing_team, "budget_duration", None) != team_budget_duration:
+                    update_data["budget_duration"] = team_budget_duration
+                    update_data["budget_reset_at"] = get_budget_reset_time(team_budget_duration)
+                elif getattr(existing_team, "budget_reset_at", None) is None:
+                    update_data["budget_reset_at"] = get_budget_reset_time(team_budget_duration)
+
+                if desired_members != _coerce_team_members(getattr(existing_team, "members_with_roles", None)):
+                    update_data["members_with_roles"] = Json(desired_members)
+                if merged_metadata != existing_metadata:
+                    update_data["metadata"] = Json(merged_metadata)
+
+                if update_data:
+                    await prisma_client.db.litellm_teamtable.update(
+                        where={"team_id": shared_team_id},
+                        data=update_data,
                     )
+            try:
+                user_api_key_cache.delete_cache(key=shared_team_id)
+            except Exception:
+                pass
             _ENSURED_TEAM_IDS.add(shared_team_id)
 
         membership_key = (shared_team_id, user_id)
         if membership_key not in _ENSURED_TEAM_MEMBERS:
-            team_info_response = await _call_management_api(
-                "GET",
-                "/team/info",
-                params={"team_id": shared_team_id},
-                expected_statuses={200},
+            team_row = await prisma_client.db.litellm_teamtable.find_unique(
+                where={"team_id": shared_team_id}
             )
-            team_info = {}
-            if isinstance(team_info_response, dict):
-                nested_team_info = team_info_response.get("team_info")
-                if isinstance(nested_team_info, dict):
-                    team_info = nested_team_info
-            members_with_roles = team_info.get("members_with_roles") or []
-            existing_member_ids = {
-                member.get("user_id")
-                for member in members_with_roles
-                if isinstance(member, dict) and member.get("user_id")
-            }
-            if user_id not in existing_member_ids:
-                await _call_management_api(
-                    "POST",
-                    "/team/member_add",
-                    json_payload={
-                        "team_id": shared_team_id,
-                        "max_budget_in_team": team_member_budget,
-                        "member": {
-                            "role": "user",
-                            "user_id": user_id,
-                        },
-                    },
-                    expected_statuses={200},
+            if team_row is not None:
+                team_members = _coerce_team_members(getattr(team_row, "members_with_roles", None))
+                desired_team_members = _upsert_team_member_entry(
+                    team_members,
+                    user_id=DEFAULT_PROXY_ADMIN_USER_ID,
+                    role="admin",
+                    user_email=None,
                 )
+                desired_team_members = _upsert_team_member_entry(
+                    desired_team_members,
+                    user_id=user_id,
+                    role="user",
+                    user_email=user_email,
+                )
+                if desired_team_members != team_members:
+                    await prisma_client.db.litellm_teamtable.update(
+                        where={"team_id": shared_team_id},
+                        data={"members_with_roles": Json(desired_team_members)},
+                    )
+            await _ensure_user_team_assignment(
+                prisma_client=prisma_client,
+                user_api_key_cache=user_api_key_cache,
+                user_id=user_id,
+                team_id=shared_team_id,
+            )
+            await _ensure_team_member_budget(
+                prisma_client=prisma_client,
+                user_id=user_id,
+                team_id=shared_team_id,
+                team_member_budget=team_member_budget,
+            )
+            try:
+                user_api_key_cache.delete_cache(key=shared_team_id)
+                user_api_key_cache.delete_cache(key=user_id)
+            except Exception:
+                pass
             _ENSURED_TEAM_MEMBERS.add(membership_key)
 
     return {
