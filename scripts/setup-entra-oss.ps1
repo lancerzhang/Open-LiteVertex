@@ -113,7 +113,7 @@ function Invite-GuestUser([string]$EmailAddress) {
     $body = @{
         invitedUserEmailAddress = $EmailAddress
         inviteRedirectUrl = "https://myapplications.microsoft.com/"
-        sendInvitationMessage = $false
+        sendInvitationMessage = $true
     } | ConvertTo-Json -Depth 5 -Compress
 
     $invitation = Invoke-AzRestJson `
