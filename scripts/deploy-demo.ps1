@@ -4,7 +4,10 @@ param(
     [string]$Region = "asia-east1",
     [string]$Namespace = "litellm-demo",
     [string]$VertexLocation = "us-central1",
-    [switch]$RotateSecrets
+    [string]$VertexProjectId = "",
+    [string]$VertexCredentialsFile = "",
+    [switch]$RotateSecrets,
+    [switch]$SkipVertexProjectSetup
 )
 
 Set-StrictMode -Version Latest
@@ -62,6 +65,35 @@ function Get-OptionalValue([hashtable]$Values, [string]$Name) {
     }
 
     return $null
+}
+
+function Get-FirstOptionalValue([hashtable]$Values, [string[]]$Names) {
+    foreach ($name in $Names) {
+        $value = Get-OptionalValue -Values $Values -Name $name
+        if ($null -ne $value -and $value.Trim()) {
+            return $value.Trim()
+        }
+    }
+
+    return $null
+}
+
+function ConvertTo-BooleanSetting([string]$Value) {
+    if ($null -eq $Value) {
+        return $false
+    }
+
+    switch -Regex ($Value.Trim().ToLowerInvariant()) {
+        "^(1|true|yes|y|on)$" {
+            return $true
+        }
+        "^(0|false|no|n|off)$" {
+            return $false
+        }
+        default {
+            throw "Invalid boolean value '$Value'. Use true/false, yes/no, on/off, or 1/0."
+        }
+    }
 }
 
 function Get-ExistingSecretObject([string]$Namespace, [string]$Name) {
@@ -246,12 +278,65 @@ $root = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $root "config\\litellm-config.yaml"
 $authHandlerPath = Join-Path $root "config\\auth_handler.py"
 $entraEnvPath = Join-Path $root ".entra.env"
+$vertexEnvPath = Join-Path $root ".vertex.env"
 $modelArmorEnvPath = Join-Path $root ".modelarmor.env"
 $entraEnv = Read-DotEnvFile -Path $entraEnvPath
+$vertexEnv = Read-DotEnvFile -Path $vertexEnvPath
 $modelArmorEnv = Read-DotEnvFile -Path $modelArmorEnvPath
 $imageRepository = "litellm-demo"
 $imageUri = "$Region-docker.pkg.dev/$ProjectId/$imageRepository/litellm-entra-oss:latest"
 $allowedModels = "vertex-gemini-2.5-flash,vertex-gemini-2.5-flash-lite,vertex-gemini-2.5-pro,vertex-gemini-3-pro-preview,vertex-gemini-3.1-pro-preview"
+
+if (-not $PSBoundParameters.ContainsKey("VertexProjectId")) {
+    $vertexProjectOverride = Get-FirstOptionalValue -Values $vertexEnv -Names @("VERTEX_PROJECT_ID", "VERTEXAI_PROJECT")
+    if ($vertexProjectOverride) {
+        $VertexProjectId = $vertexProjectOverride
+    }
+}
+if (-not $VertexProjectId) {
+    $VertexProjectId = $ProjectId
+}
+
+if (-not $PSBoundParameters.ContainsKey("VertexLocation")) {
+    $vertexLocationOverride = Get-FirstOptionalValue -Values $vertexEnv -Names @("VERTEX_LOCATION", "VERTEXAI_LOCATION")
+    if ($vertexLocationOverride) {
+        $VertexLocation = $vertexLocationOverride
+    }
+}
+
+if (-not $PSBoundParameters.ContainsKey("VertexCredentialsFile")) {
+    $vertexCredentialsFileOverride = Get-FirstOptionalValue -Values $vertexEnv -Names @("VERTEXAI_CREDENTIALS_FILE")
+    if ($vertexCredentialsFileOverride) {
+        $VertexCredentialsFile = $vertexCredentialsFileOverride
+    }
+}
+
+$vertexCredentials = Get-FirstOptionalValue -Values $vertexEnv -Names @("VERTEXAI_CREDENTIALS")
+if ($VertexCredentialsFile) {
+    $resolvedVertexCredentialsFile = $VertexCredentialsFile
+    if (-not [System.IO.Path]::IsPathRooted($resolvedVertexCredentialsFile)) {
+        $resolvedVertexCredentialsFile = Join-Path $root $resolvedVertexCredentialsFile
+    }
+    if (-not (Test-Path $resolvedVertexCredentialsFile)) {
+        throw "Vertex credentials file not found: $resolvedVertexCredentialsFile"
+    }
+
+    $vertexCredentials = [System.IO.File]::ReadAllText($resolvedVertexCredentialsFile)
+    $VertexCredentialsFile = $resolvedVertexCredentialsFile
+}
+
+$vertexProjectIsRemote = $VertexProjectId -ne $ProjectId
+$skipVertexProjectSetup = $SkipVertexProjectSetup.IsPresent
+if (-not $PSBoundParameters.ContainsKey("SkipVertexProjectSetup")) {
+    $skipVertexProjectSetupOverride = Get-FirstOptionalValue -Values $vertexEnv -Names @("VERTEX_SKIP_PROJECT_SETUP")
+    if ($null -ne $skipVertexProjectSetupOverride) {
+        $skipVertexProjectSetup = ConvertTo-BooleanSetting -Value $skipVertexProjectSetupOverride
+    } elseif ($vertexProjectIsRemote) {
+        $skipVertexProjectSetup = $true
+    }
+}
+
+$vertexUsesExplicitCredentials = [bool]($vertexCredentials -and $vertexCredentials.Trim())
 $modelArmorTemplate = Get-OptionalValue -Values $modelArmorEnv -Name "VERTEX_MODEL_ARMOR_TEMPLATE"
 $modelArmorPromptTemplate = Get-OptionalValue -Values $modelArmorEnv -Name "VERTEX_MODEL_ARMOR_PROMPT_TEMPLATE"
 if (-not $modelArmorPromptTemplate) {
@@ -262,15 +347,27 @@ if (-not $modelArmorResponseTemplate) {
     $modelArmorResponseTemplate = $modelArmorTemplate
 }
 $modelArmorEnabled = [bool]($modelArmorPromptTemplate -or $modelArmorResponseTemplate)
-$projectNumber = Get-ProjectNumber -ProjectId $ProjectId
 
 gcloud config set project $ProjectId | Out-Null
 gcloud services enable `
     container.googleapis.com `
-    aiplatform.googleapis.com `
     artifactregistry.googleapis.com `
     cloudbuild.googleapis.com `
     --project $ProjectId | Out-Null
+
+if ($vertexProjectIsRemote) {
+    if ($skipVertexProjectSetup) {
+        Write-Host "Skipping remote Vertex project setup for $VertexProjectId. Ensure the provider team has already enabled Vertex AI and granted IAM."
+    } else {
+        gcloud services enable `
+            aiplatform.googleapis.com `
+            --project $VertexProjectId | Out-Null
+    }
+} else {
+    gcloud services enable `
+        aiplatform.googleapis.com `
+        --project $VertexProjectId | Out-Null
+}
 
 $clusterExists = $false
 try {
@@ -306,12 +403,17 @@ Build-CustomImage `
     -RootPath $root
 
 if ($modelArmorEnabled) {
-    $vertexServiceAgent = "service-$projectNumber@gcp-sa-aiplatform.iam.gserviceaccount.com"
-    gcloud services enable modelarmor.googleapis.com --project $ProjectId | Out-Null
-    Invoke-GCloudWithRetry {
-        gcloud projects add-iam-policy-binding $ProjectId `
-            --member="serviceAccount:$vertexServiceAgent" `
-            --role="roles/modelarmor.user" | Out-Null
+    if ($vertexProjectIsRemote -and $skipVertexProjectSetup) {
+        Write-Host "Skipping remote Model Armor setup for $VertexProjectId. Ensure the provider team enables modelarmor.googleapis.com and grants roles/modelarmor.user to the Vertex AI service agent."
+    } else {
+        $vertexProjectNumber = Get-ProjectNumber -ProjectId $VertexProjectId
+        $vertexServiceAgent = "service-$vertexProjectNumber@gcp-sa-aiplatform.iam.gserviceaccount.com"
+        gcloud services enable modelarmor.googleapis.com --project $VertexProjectId | Out-Null
+        Invoke-GCloudWithRetry {
+            gcloud projects add-iam-policy-binding $VertexProjectId `
+                --member="serviceAccount:$vertexServiceAgent" `
+                --role="roles/modelarmor.user" | Out-Null
+        }
     }
 }
 
@@ -321,10 +423,16 @@ kubectl apply -f (Join-Path $root "k8s\\litellm-serviceaccount.yaml") | Out-Null
 $gsaEmail = Ensure-ServiceAccount -ProjectId $ProjectId -Name "litellm-vertex" -DisplayName "LiteLLM Vertex Demo"
 Wait-ForServiceAccount -ProjectId $ProjectId -Email $gsaEmail
 
-Invoke-GCloudWithRetry {
-    gcloud projects add-iam-policy-binding $ProjectId `
-        --member="serviceAccount:$gsaEmail" `
-        --role="roles/aiplatform.user" | Out-Null
+if ($vertexUsesExplicitCredentials) {
+    Write-Host "Using explicit Vertex credentials. Skipping Workload Identity access grant on the Vertex provider project."
+} elseif ($vertexProjectIsRemote -and $skipVertexProjectSetup) {
+    Write-Host "Skipping remote Vertex IAM binding for $gsaEmail on $VertexProjectId. Ensure the provider team grants roles/aiplatform.user."
+} else {
+    Invoke-GCloudWithRetry {
+        gcloud projects add-iam-policy-binding $VertexProjectId `
+            --member="serviceAccount:$gsaEmail" `
+            --role="roles/aiplatform.user" | Out-Null
+    }
 }
 
 gcloud iam service-accounts add-iam-policy-binding $gsaEmail `
@@ -407,6 +515,13 @@ if (-not $entraJwksUri -and $entraTenantId) {
     $entraJwksUri = "https://login.microsoftonline.com/$entraTenantId/discovery/v2.0/keys"
 }
 
+$vertexCredentialsYaml = '  vertex-credentials: ""'
+if ($vertexUsesExplicitCredentials) {
+    $normalizedVertexCredentials = ($vertexCredentials -replace "`r`n", "`n").TrimEnd("`n")
+    $vertexCredentialsLines = ($normalizedVertexCredentials -split "`n" | ForEach-Object { "    $_" }) -join "`n"
+    $vertexCredentialsYaml = "  vertex-credentials: |-" + "`n" + $vertexCredentialsLines
+}
+
 $secretYaml = @"
 apiVersion: v1
 kind: Secret
@@ -419,8 +534,9 @@ stringData:
   database-url: "$databaseUrl"
   litellm-master-key: "$masterKey"
   litellm-salt-key: "$saltKey"
-  vertex-project: "$ProjectId"
+  vertex-project: "$VertexProjectId"
   vertex-location: "$VertexLocation"
+$vertexCredentialsYaml
   entra-tenant-id: "$entraTenantId"
   entra-client-id: "$entraClientId"
   entra-public-client-id: "$entraPublicClientId"
@@ -494,6 +610,9 @@ LITELLM_BASE_URL=$baseUrl
 LITELLM_API_KEY=$demoKey
 LITELLM_MASTER_KEY=$masterKey
 GCP_PROJECT_ID=$ProjectId
+GCP_DEPLOY_PROJECT_ID=$ProjectId
+VERTEX_PROJECT_ID=$VertexProjectId
+VERTEX_LOCATION=$VertexLocation
 GKE_CLUSTER=$ClusterName
 GKE_REGION=$Region
 LITELLM_IMAGE=$imageUri
@@ -506,6 +625,17 @@ Write-Host ""
 Write-Host "Deployment completed."
 Write-Host "LiteLLM endpoint: $baseUrl"
 Write-Host "Demo env file: $demoEnvPath"
+Write-Host "Deploy project: $ProjectId"
+Write-Host "Vertex project: $VertexProjectId"
+Write-Host "Vertex location: $VertexLocation"
+if ($vertexUsesExplicitCredentials) {
+    Write-Host "Vertex auth mode: explicit VERTEXAI_CREDENTIALS"
+} else {
+    Write-Host "Vertex auth mode: Workload Identity via $gsaEmail"
+}
+if ($vertexProjectIsRemote -and $skipVertexProjectSetup) {
+    Write-Host "Remote Vertex project setup was skipped. Coordinate API enablement and IAM grants with the provider team."
+}
 if ($modelArmorEnabled) {
     Write-Host "Vertex Model Armor templates enabled for Gemini generateContent calls."
 }

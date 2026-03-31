@@ -1,5 +1,6 @@
 .demo.env
 .entra.env
+.vertex.env
 .modelarmor.env
 .secrets/
 .venv/

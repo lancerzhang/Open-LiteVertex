@@ -2,7 +2,7 @@
 
 Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Autopilot` and can gate access with `Microsoft Entra ID` through LiteLLM `custom_auth`.
 
-当前仓库的客户端路径已经收敛为两种：
+The repository currently supports two client paths:
 
 - `OpenCode(global plugin auth) -> LiteLLM OSS(custom_auth) -> Vertex AI`
 - `OpenCode(direct bearer token) -> LiteLLM OSS(custom_auth) -> Vertex AI`
@@ -15,6 +15,7 @@ Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Aut
 - Uses `Workload Identity` so LiteLLM can call `Vertex AI` without a JSON key.
 - Loads `custom_auth` inside the LiteLLM pod for `Entra JWT groups` validation.
 - Optionally injects `Vertex AI Model Armor` template settings into Gemini `generateContent` calls.
+- Supports split ownership where one team runs `Entra + LiteLLM + GKE` and another team owns the `Vertex AI` project.
 - Auto-creates a LiteLLM internal user per Entra `oid` and places Entra users into a shared LiteLLM team.
 - Creates a demo key with a `$50 / 7d` budget.
 - Writes the endpoint and key to `.demo.env`.
@@ -23,9 +24,11 @@ Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Aut
 
 - `config/auth_handler.py`: OSS `custom_auth` handler for Entra groups, user upsert, shared-team assignment, and optional Vertex Model Armor injection.
 - `config/litellm-config.yaml`: base LiteLLM routing and model config.
+- `.vertex.example.env`: example configuration for using a separate Vertex provider project.
 - `.modelarmor.example.env`: example Model Armor template wiring for Gemini `generateContent`.
 - `config/opencode.example.json`: example `OpenCode` provider config.
 - `config/opencode.global.json`: canonical global `OpenCode` provider config installed into `~/.config/opencode/opencode.json`.
+- `docs/cross-project-vertex-provider.md`: English guide for running LiteLLM in one project and Vertex AI in another team's project.
 - `docs/opencode-litellm-entra-vertex-flow.md`: architecture and end-to-end flow.
 - `k8s/`: Kubernetes manifests.
 - `plugins/entra-litellm-auth.ts`: canonical source for the global OpenCode Entra plugin.
@@ -50,6 +53,17 @@ Step 1. Deploy the backend from the repo root:
 Get-Content .demo.env
 ```
 
+If another team owns the Vertex AI project, create `.vertex.env` first and follow the cross-project guide:
+
+```powershell
+Copy-Item .vertex.example.env .vertex.env
+.\scripts\deploy-demo.ps1 -ProjectId "<deploy-project>" -VertexProjectId "<vertex-provider-project>"
+```
+
+Reference:
+
+- [docs/cross-project-vertex-provider.md](docs/cross-project-vertex-provider.md)
+
 If you want Vertex Model Armor on Gemini traffic, create `.modelarmor.env` first and deploy to a supported Vertex location such as `us-central1`:
 
 ```powershell
@@ -64,6 +78,22 @@ Step 2. Bootstrap Entra for LiteLLM OSS:
   -TenantId "<your-tenant-id>" `
   -AllowedGroupName "opencode-users"
 ```
+
+## Cross-Project Vertex Provider
+
+This repo now supports a split deployment where:
+
+- your team owns `Entra + LiteLLM + GKE`
+- another team owns the `Vertex AI` project
+
+Two auth models are supported:
+
+- preferred: `Workload Identity + cross-project IAM`
+- fallback: `VERTEXAI_CREDENTIALS_FILE` with a shared JSON service account key
+
+See the full English deployment guide here:
+
+- [docs/cross-project-vertex-provider.md](docs/cross-project-vertex-provider.md)
 
 ## User Init
 
@@ -147,6 +177,7 @@ Important notes from the Google Cloud integration docs as of March 26, 2026:
 - The documented supported Vertex locations are `us-central1`, `us-east4`, `us-west1`, and `europe-west4`.
 - If Vertex AI runs in a region where Model Armor integration is unavailable, Vertex AI can continue the request without sanitization.
 - Partner models such as `vertex-claude-sonnet-4-6` do not use the Gemini `generateContent` path, so this repo only injects Model Armor for Gemini routes.
+- If you split deployment and Vertex into different projects, grant Model Armor on the Vertex provider project, not the GKE/LiteLLM project.
 
 ## Entra OSS Setup
 

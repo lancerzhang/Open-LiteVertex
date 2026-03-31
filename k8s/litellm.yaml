@@ -37,6 +37,11 @@ spec:
                 secretKeyRef:
                   name: litellm-secrets
                   key: vertex-location
+            - name: VERTEXAI_CREDENTIALS
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: vertex-credentials
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
