@@ -141,6 +141,87 @@ def _install_vertex_request_trace_patch() -> None:
 _install_vertex_request_trace_patch()
 
 
+def _build_model_armor_config_from_env() -> Optional[Dict[str, str]]:
+    shared_template = _first_env("VERTEX_MODEL_ARMOR_TEMPLATE")
+    prompt_template = _first_env("VERTEX_MODEL_ARMOR_PROMPT_TEMPLATE")
+    response_template = _first_env("VERTEX_MODEL_ARMOR_RESPONSE_TEMPLATE")
+
+    config: Dict[str, str] = {}
+    if prompt_template or shared_template:
+        config["promptTemplateName"] = (prompt_template or shared_template or "").strip()
+    if response_template or shared_template:
+        config["responseTemplateName"] = (response_template or shared_template or "").strip()
+
+    return config or None
+
+
+def _normalize_model_armor_config(raw_config: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(raw_config, dict):
+        return None
+
+    prompt_template = raw_config.get("promptTemplateName")
+    if prompt_template is None:
+        prompt_template = raw_config.get("prompt_template_name")
+
+    response_template = raw_config.get("responseTemplateName")
+    if response_template is None:
+        response_template = raw_config.get("response_template_name")
+
+    normalized: Dict[str, str] = {}
+    if isinstance(prompt_template, str) and prompt_template.strip():
+        normalized["promptTemplateName"] = prompt_template.strip()
+    if isinstance(response_template, str) and response_template.strip():
+        normalized["responseTemplateName"] = response_template.strip()
+
+    return normalized or None
+
+
+def _install_vertex_model_armor_patch() -> None:
+    try:
+        from litellm.llms.vertex_ai.gemini import transformation as vertex_gemini_transformation
+    except Exception as exc:
+        logging.exception("Unable to install Vertex Model Armor patch: %s", exc)
+        return
+
+    original_pop_and_merge_extra_body = vertex_gemini_transformation._pop_and_merge_extra_body
+    if getattr(original_pop_and_merge_extra_body, "_open_litevertex_model_armor_patch", False):
+        return
+
+    def patched_pop_and_merge_extra_body(data: Any, optional_params: dict) -> None:
+        patched_optional_params = dict(optional_params)
+        extra_body = patched_optional_params.get("extra_body")
+        if extra_body is not None and not isinstance(extra_body, dict):
+            return original_pop_and_merge_extra_body(data, optional_params)
+
+        merged_extra_body = dict(extra_body or {})
+        existing_model_armor_config = _normalize_model_armor_config(
+            merged_extra_body.get("modelArmorConfig")
+            or merged_extra_body.get("model_armor_config")
+        )
+        merged_extra_body.pop("model_armor_config", None)
+        env_model_armor_config = _build_model_armor_config_from_env()
+
+        if existing_model_armor_config is not None:
+            merged_extra_body["modelArmorConfig"] = existing_model_armor_config
+        elif env_model_armor_config is not None:
+            merged_extra_body["modelArmorConfig"] = env_model_armor_config
+        else:
+            merged_extra_body.pop("modelArmorConfig", None)
+
+        if merged_extra_body:
+            patched_optional_params["extra_body"] = merged_extra_body
+        else:
+            patched_optional_params.pop("extra_body", None)
+
+        return original_pop_and_merge_extra_body(data, patched_optional_params)
+
+    setattr(patched_pop_and_merge_extra_body, "_open_litevertex_model_armor_patch", True)
+    vertex_gemini_transformation._pop_and_merge_extra_body = patched_pop_and_merge_extra_body
+
+
+_install_vertex_model_armor_patch()
+
+
 def _install_admin_ui_session_key_patch() -> None:
     try:
         from litellm.constants import LITELLM_PROXY_ADMIN_NAME

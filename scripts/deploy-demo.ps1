@@ -3,7 +3,7 @@ param(
     [string]$ClusterName = "litellm-demo",
     [string]$Region = "asia-east1",
     [string]$Namespace = "litellm-demo",
-    [string]$VertexLocation = "global",
+    [string]$VertexLocation = "us-central1",
     [switch]$RotateSecrets
 )
 
@@ -43,6 +43,25 @@ function Read-DotEnvFile([string]$Path) {
     }
 
     return $values
+}
+
+function Get-OptionalValue([hashtable]$Values, [string]$Name) {
+    $envItem = Get-Item -Path ("Env:" + $Name) -ErrorAction SilentlyContinue
+    if ($null -ne $envItem) {
+        $envValue = [string]$envItem.Value
+        if ($envValue.Trim()) {
+            return $envValue.Trim()
+        }
+    }
+
+    if ($Values.ContainsKey($Name)) {
+        $fileValue = [string]$Values[$Name]
+        if ($fileValue.Trim()) {
+            return $fileValue.Trim()
+        }
+    }
+
+    return $null
 }
 
 function Get-ExistingSecretObject([string]$Namespace, [string]$Name) {
@@ -167,10 +186,22 @@ function Ensure-ServiceAccount([string]$ProjectId, [string]$Name, [string]$Displ
     return $email
 }
 
-function Wait-ForServiceAccount([string]$Email) {
+function Get-ProjectNumber([string]$ProjectId) {
+    $projectNumber = gcloud projects describe $ProjectId --format="value(projectNumber)"
+    if (-not $projectNumber) {
+        throw "Unable to retrieve project number for $ProjectId."
+    }
+
+    return [string]$projectNumber
+}
+
+function Wait-ForServiceAccount([string]$ProjectId, [string]$Email) {
     while ($true) {
-        gcloud iam service-accounts describe $Email --format="value(email)" 1>$null 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        $existing = gcloud iam service-accounts list `
+            --project $ProjectId `
+            --filter="email=$Email" `
+            --format="value(email)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $existing) {
             return
         }
 
@@ -215,10 +246,23 @@ $root = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $root "config\\litellm-config.yaml"
 $authHandlerPath = Join-Path $root "config\\auth_handler.py"
 $entraEnvPath = Join-Path $root ".entra.env"
+$modelArmorEnvPath = Join-Path $root ".modelarmor.env"
 $entraEnv = Read-DotEnvFile -Path $entraEnvPath
+$modelArmorEnv = Read-DotEnvFile -Path $modelArmorEnvPath
 $imageRepository = "litellm-demo"
 $imageUri = "$Region-docker.pkg.dev/$ProjectId/$imageRepository/litellm-entra-oss:latest"
 $allowedModels = "vertex-gemini-2.5-flash,vertex-gemini-2.5-flash-lite,vertex-gemini-2.5-pro,vertex-gemini-3-pro-preview,vertex-gemini-3.1-pro-preview"
+$modelArmorTemplate = Get-OptionalValue -Values $modelArmorEnv -Name "VERTEX_MODEL_ARMOR_TEMPLATE"
+$modelArmorPromptTemplate = Get-OptionalValue -Values $modelArmorEnv -Name "VERTEX_MODEL_ARMOR_PROMPT_TEMPLATE"
+if (-not $modelArmorPromptTemplate) {
+    $modelArmorPromptTemplate = $modelArmorTemplate
+}
+$modelArmorResponseTemplate = Get-OptionalValue -Values $modelArmorEnv -Name "VERTEX_MODEL_ARMOR_RESPONSE_TEMPLATE"
+if (-not $modelArmorResponseTemplate) {
+    $modelArmorResponseTemplate = $modelArmorTemplate
+}
+$modelArmorEnabled = [bool]($modelArmorPromptTemplate -or $modelArmorResponseTemplate)
+$projectNumber = Get-ProjectNumber -ProjectId $ProjectId
 
 gcloud config set project $ProjectId | Out-Null
 gcloud services enable `
@@ -261,11 +305,21 @@ Build-CustomImage `
     -ImageUri $imageUri `
     -RootPath $root
 
+if ($modelArmorEnabled) {
+    $vertexServiceAgent = "service-$projectNumber@gcp-sa-aiplatform.iam.gserviceaccount.com"
+    gcloud services enable modelarmor.googleapis.com --project $ProjectId | Out-Null
+    Invoke-GCloudWithRetry {
+        gcloud projects add-iam-policy-binding $ProjectId `
+            --member="serviceAccount:$vertexServiceAgent" `
+            --role="roles/modelarmor.user" | Out-Null
+    }
+}
+
 kubectl apply -f (Join-Path $root "k8s\\namespace.yaml") | Out-Null
 kubectl apply -f (Join-Path $root "k8s\\litellm-serviceaccount.yaml") | Out-Null
 
 $gsaEmail = Ensure-ServiceAccount -ProjectId $ProjectId -Name "litellm-vertex" -DisplayName "LiteLLM Vertex Demo"
-Wait-ForServiceAccount -Email $gsaEmail
+Wait-ForServiceAccount -ProjectId $ProjectId -Email $gsaEmail
 
 Invoke-GCloudWithRetry {
     gcloud projects add-iam-policy-binding $ProjectId `
@@ -314,12 +368,7 @@ if (-not $entraAllowedGroupIds) {
 }
 $entraSharedTeamId = $entraEnv["ENTRA_SHARED_TEAM_ID"]
 if (-not $entraSharedTeamId -and $entraAllowedGroupIds) {
-    $entraSharedTeamId = (
-        ($entraAllowedGroupIds -split "[,;]")
-        | ForEach-Object { $_.Trim() }
-        | Where-Object { $_ }
-        | Select-Object -First 1
-    )
+    $entraSharedTeamId = (($entraAllowedGroupIds -split "[,;]") | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -First 1)
 }
 if (-not $entraSharedTeamId) {
     $entraSharedTeamId = "entra-shared-team"
@@ -387,6 +436,9 @@ stringData:
   entra-shared-team-max-budget: "$entraSharedTeamMaxBudget"
   entra-shared-team-budget-duration: "$entraSharedTeamBudgetDuration"
   entra-shared-team-member-max-budget: "$entraSharedTeamMemberMaxBudget"
+  vertex-model-armor-template: "$modelArmorTemplate"
+  vertex-model-armor-prompt-template: "$modelArmorPromptTemplate"
+  vertex-model-armor-response-template: "$modelArmorResponseTemplate"
 "@
 
 $secretYaml | kubectl apply -f - | Out-Null
@@ -403,7 +455,16 @@ kubectl create configmap litellm-config `
     --from-file=auth_handler.py=$authHandlerPath `
     --dry-run=client -o yaml | kubectl apply -f - | Out-Null
 
-kubectl apply -f (Join-Path $root "k8s\\litellm.yaml") | Out-Null
+$litellmManifestPath = Join-Path $root "k8s\\litellm.yaml"
+kubectl apply -f $litellmManifestPath | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Retrying LiteLLM manifest apply by recreating the Deployment..."
+    kubectl delete deployment litellm -n $Namespace --ignore-not-found | Out-Null
+    kubectl apply -f $litellmManifestPath | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "LiteLLM manifest apply failed."
+    }
+}
 kubectl set image deployment/litellm litellm=$imageUri -n $Namespace | Out-Null
 kubectl rollout restart deployment/litellm -n $Namespace | Out-Null
 kubectl rollout status deployment/litellm -n $Namespace --timeout=10m | Out-Null
@@ -445,3 +506,6 @@ Write-Host ""
 Write-Host "Deployment completed."
 Write-Host "LiteLLM endpoint: $baseUrl"
 Write-Host "Demo env file: $demoEnvPath"
+if ($modelArmorEnabled) {
+    Write-Host "Vertex Model Armor templates enabled for Gemini generateContent calls."
+}

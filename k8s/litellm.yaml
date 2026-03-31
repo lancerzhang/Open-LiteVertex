@@ -133,6 +133,21 @@ spec:
               value: "true"
             - name: VERTEX_TRACE_INCLUDE_SECRETS
               value: "false"
+            - name: VERTEX_MODEL_ARMOR_TEMPLATE
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: vertex-model-armor-template
+            - name: VERTEX_MODEL_ARMOR_PROMPT_TEMPLATE
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: vertex-model-armor-prompt-template
+            - name: VERTEX_MODEL_ARMOR_RESPONSE_TEMPLATE
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: vertex-model-armor-response-template
           startupProbe:
             tcpSocket:
               port: 4000

@@ -1,5 +1,6 @@
 .demo.env
 .entra.env
+.modelarmor.env
 .secrets/
 .venv/
 __pycache__/

@@ -14,14 +14,16 @@ Open LiteVertex deploys a minimal `LiteLLM OSS -> Vertex AI` gateway on `GKE Aut
 - Builds a thin custom LiteLLM image on top of the official stable image.
 - Uses `Workload Identity` so LiteLLM can call `Vertex AI` without a JSON key.
 - Loads `custom_auth` inside the LiteLLM pod for `Entra JWT groups` validation.
+- Optionally injects `Vertex AI Model Armor` template settings into Gemini `generateContent` calls.
 - Auto-creates a LiteLLM internal user per Entra `oid` and places Entra users into a shared LiteLLM team.
 - Creates a demo key with a `$50 / 7d` budget.
 - Writes the endpoint and key to `.demo.env`.
 
 ## Files
 
-- `config/auth_handler.py`: OSS `custom_auth` handler for Entra groups, user upsert, and shared-team assignment.
+- `config/auth_handler.py`: OSS `custom_auth` handler for Entra groups, user upsert, shared-team assignment, and optional Vertex Model Armor injection.
 - `config/litellm-config.yaml`: base LiteLLM routing and model config.
+- `.modelarmor.example.env`: example Model Armor template wiring for Gemini `generateContent`.
 - `config/opencode.example.json`: example `OpenCode` provider config.
 - `config/opencode.global.json`: canonical global `OpenCode` provider config installed into `~/.config/opencode/opencode.json`.
 - `docs/opencode-litellm-entra-vertex-flow.md`: architecture and end-to-end flow.
@@ -46,6 +48,13 @@ Step 1. Deploy the backend from the repo root:
 ```powershell
 .\scripts\deploy-demo.ps1
 Get-Content .demo.env
+```
+
+If you want Vertex Model Armor on Gemini traffic, create `.modelarmor.env` first and deploy to a supported Vertex location such as `us-central1`:
+
+```powershell
+Copy-Item .modelarmor.example.env .modelarmor.env
+.\scripts\deploy-demo.ps1 -VertexLocation us-central1
 ```
 
 Step 2. Bootstrap Entra for LiteLLM OSS:
@@ -109,6 +118,35 @@ With the default OSS `custom_auth` path:
 - the user keeps personal spend tracking and a personal budget
 - the same user is also added to one shared LiteLLM team
 - requests are tagged with that `team_id`, so team spend and team budget work in the LiteLLM UI
+
+## Model Armor
+
+The repo can optionally inject Vertex AI `modelArmorConfig` into Gemini `generateContent` requests at runtime. This is controlled by `.modelarmor.env` or same-named process environment variables.
+
+Start from the example file:
+
+```powershell
+Copy-Item .modelarmor.example.env .modelarmor.env
+```
+
+Supported variables:
+
+- `VERTEX_MODEL_ARMOR_TEMPLATE`: shorthand that applies one template to both prompt and response.
+- `VERTEX_MODEL_ARMOR_PROMPT_TEMPLATE`: prompt-specific template resource name.
+- `VERTEX_MODEL_ARMOR_RESPONSE_TEMPLATE`: response-specific template resource name.
+
+When Model Armor is configured, `.\scripts\deploy-demo.ps1` also:
+
+- enables `modelarmor.googleapis.com`
+- grants `roles/modelarmor.user` to the Vertex AI service agent for the project
+- passes the template names into the LiteLLM pod
+
+Important notes from the Google Cloud integration docs as of March 26, 2026:
+
+- Vertex AI template integration is for Gemini `generateContent`.
+- The documented supported Vertex locations are `us-central1`, `us-east4`, `us-west1`, and `europe-west4`.
+- If Vertex AI runs in a region where Model Armor integration is unavailable, Vertex AI can continue the request without sanitization.
+- Partner models such as `vertex-claude-sonnet-4-6` do not use the Gemini `generateContent` path, so this repo only injects Model Armor for Gemini routes.
 
 ## Entra OSS Setup
 
